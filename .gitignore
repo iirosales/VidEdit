@@ -1,0 +1,29 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# FFmpeg temporary pass logs & test artifacts
+ffmpeg2pass-*
+*.log
+temp_*
+
+# Sample / exported local media files
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.avi
+*.gif
+
+# OS & editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
