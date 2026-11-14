@@ -154,8 +154,8 @@ class MainWindow(QMainWindow):
         transport.setSpacing(8)
         self._play_btn = QPushButton("Play")
         self._play_btn.setFixedWidth(74)
-        self._step_back_btn = QPushButton("-1s")
-        self._step_fwd_btn = QPushButton("+1s")
+        self._step_back_btn = QPushButton("-0.1s")
+        self._step_fwd_btn = QPushButton("+0.1s")
         self._time_label = QLabel("00:00.00 / 00:00.00")
         self._time_label.setObjectName("BadgeLabel")
 
@@ -424,8 +424,8 @@ class MainWindow(QMainWindow):
         self._drop_open_btn.clicked.connect(self._choose_input_file)
 
         self._play_btn.clicked.connect(self._toggle_play_pause)
-        self._step_back_btn.clicked.connect(lambda: self._step_by_ms(-1000))
-        self._step_fwd_btn.clicked.connect(lambda: self._step_by_ms(1000))
+        self._step_back_btn.clicked.connect(lambda: self._step_by_ms(-100))
+        self._step_fwd_btn.clicked.connect(lambda: self._step_by_ms(100))
         self._mute_preview_btn.clicked.connect(self._toggle_preview_mute)
         self._volume_slider.valueChanged.connect(lambda v: self._audio_output.setVolume(v / 100.0))
 
@@ -459,10 +459,10 @@ class MainWindow(QMainWindow):
         self._bind_shortcut("Space", self._toggle_play_pause)
         self._bind_shortcut("I", self._set_in_at_playhead)
         self._bind_shortcut("O", self._set_out_at_playhead)
-        self._bind_shortcut("Left", lambda: self._step_by_ms(-1000))
-        self._bind_shortcut("Right", lambda: self._step_by_ms(1000))
-        self._bind_shortcut("Shift+Left", lambda: self._step_by_ms(-100))
-        self._bind_shortcut("Shift+Right", lambda: self._step_by_ms(100))
+        self._bind_shortcut("Left", lambda: self._step_by_ms(-100))
+        self._bind_shortcut("Right", lambda: self._step_by_ms(100))
+        self._bind_shortcut("Shift+Left", lambda: self._step_by_ms(-1000))
+        self._bind_shortcut("Shift+Right", lambda: self._step_by_ms(1000))
 
     def _bind_shortcut(self, key: str, callback) -> None:
         shortcut = QShortcut(QKeySequence(key), self)

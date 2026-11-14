@@ -25,5 +25,5 @@ On Windows, you can also double-click `VidEdit.bat` after installing dependencie
 - `Space`: Play / Pause
 - `I`: Set **In** (Start) point at current playhead
 - `O`: Set **Out** (End) point at current playhead
-- `Left` / `Right`: Step backward / forward 1 second
-- `Shift + Left` / `Shift + Right`: Step backward / forward 0.1 seconds
+- `Left` / `Right`: Step backward / forward 0.1 seconds
+- `Shift + Left` / `Shift + Right`: Step backward / forward 1 second

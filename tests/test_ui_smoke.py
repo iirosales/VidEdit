@@ -72,10 +72,17 @@ def test_main_window_loads_video_and_switches_presets(qt_app: QApplication, tmp_
     )
 
     win = MainWindow()
+    assert win._step_back_btn.text() == "-0.1s"
+    assert win._step_fwd_btn.text() == "+0.1s"
     win.load_video(clip)
 
     assert win._video_info is not None
     assert win._export_btn.isEnabled()
+
+    win._step_fwd_btn.click()
+    assert win._timeline._position_ms == 100
+    win._step_back_btn.click()
+    assert win._timeline._position_ms == 0
 
     # Switch to 10 MB preset and verify estimate & output filename
     win._size_buttons["10"].setChecked(True)
