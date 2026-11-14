@@ -12,7 +12,6 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from videdit.ffmpeg_tools import find_ffmpeg_binaries
 from videdit.ui.main_window import MainWindow
-from videdit.ui.styles import DARK_STYLESHEET
 
 
 def resolve_app_icon_path() -> Optional[Path]:
@@ -37,7 +36,7 @@ def main() -> int:
 
     app = QApplication(sys.argv)
     app.setApplicationName("VidEdit")
-    app.setStyleSheet(DARK_STYLESHEET)
+    app.setOrganizationName("iirosales")
 
     icon_path = resolve_app_icon_path()
     if icon_path is not None:

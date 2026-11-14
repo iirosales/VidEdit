@@ -1,4 +1,4 @@
-"""Main desktop window for VidEdit."""
+"""Main desktop window for VidEdit (Porcelain Clockwork Commander edition)."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ import subprocess
 from pathlib import Path
 from typing import Literal, Optional
 
-from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QKeySequence, QShortcut
+from PySide6.QtCore import QSettings, Qt, QUrl
+from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QKeySequence, QMouseEvent, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QSizeGrip,
     QSlider,
     QStackedWidget,
     QVBoxLayout,
@@ -34,9 +35,13 @@ from PySide6.QtWidgets import (
 
 from videdit.exporter import ExportOptions, ExportWorker
 from videdit.ffmpeg_tools import VideoInfo, calculate_mp4_encoding_plan, probe_video
+from videdit.ui.chrome import CommandEntry, CommandPalette, DropStageWidget, TitleBar
+from videdit.ui.icons import ClockworkSpinner, make_monoline_icon
+from videdit.ui.theme import ThemeName, ThemeTokens, build_stylesheet, get_theme
 from videdit.ui.timeline import TrimTimelineWidget
 
 SUPPORTED_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".gif"}
+_RESIZE_MARGIN = 6
 
 
 def format_timestamp_ms(ms: int) -> str:
@@ -60,18 +65,33 @@ def format_file_size(num_bytes: int) -> str:
     return f"{num_bytes} B"
 
 
-class MainWindow(QMainWindow):
-    """Primary VidEdit desktop interface."""
+def _resolve_icon_path() -> Optional[Path]:
+    candidate = Path(__file__).resolve().parent.parent.parent / "favicon.ico"
+    return candidate if candidate.is_file() else None
 
-    def __init__(self) -> None:
+
+class MainWindow(QMainWindow):
+    """Primary VidEdit desktop interface with dual Alabaster/Midnight themes."""
+
+    def __init__(self, initial_theme: Optional[ThemeName] = None) -> None:
         super().__init__()
         self.setWindowTitle("VidEdit — Cut, GIF & Discord Compressor")
-        icon_path = Path(__file__).resolve().parent.parent.parent / "favicon.ico"
-        if icon_path.is_file():
-            self.setWindowIcon(QIcon(str(icon_path)))
-        self.resize(1140, 720)
-        self.setMinimumSize(920, 620)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
+
+        self._icon_path = _resolve_icon_path()
+        if self._icon_path is not None:
+            self.setWindowIcon(QIcon(str(self._icon_path)))
+
+        self.resize(1160, 740)
+        self.setMinimumSize(920, 640)
         self.setAcceptDrops(True)
+
+        self._settings = QSettings("iirosales", "VidEdit")
+        saved_theme = str(self._settings.value("ui/theme", "dark"))
+        theme_key: ThemeName = initial_theme if initial_theme in ("light", "dark") else (
+            "light" if saved_theme == "light" else "dark"
+        )
+        self._theme: ThemeTokens = get_theme(theme_key)
 
         self._video_info: Optional[VideoInfo] = None
         self._duration_ms: int = 0
@@ -89,12 +109,25 @@ class MainWindow(QMainWindow):
         self._connect_signals()
         self._setup_shortcuts()
         self._update_controls_enabled(False)
+        self.apply_theme(self._theme.name)
 
     def _build_ui(self) -> None:
-        root = QWidget()
-        self.setCentralWidget(root)
-        outer = QHBoxLayout(root)
-        outer.setContentsMargins(14, 14, 14, 14)
+        shell = QWidget()
+        shell.setObjectName("MainSurface")
+        self.setCentralWidget(shell)
+
+        shell_layout = QVBoxLayout(shell)
+        shell_layout.setContentsMargins(0, 0, 0, 0)
+        shell_layout.setSpacing(0)
+
+        # 36px custom window titlebar
+        self._title_bar = TitleBar(shell, self._icon_path)
+        shell_layout.addWidget(self._title_bar)
+
+        # Workspace body
+        body = QWidget()
+        outer = QHBoxLayout(body)
+        outer.setContentsMargins(14, 12, 14, 12)
         outer.setSpacing(14)
 
         # Left column: video preview + transport + timeline
@@ -102,46 +135,46 @@ class MainWindow(QMainWindow):
         left_col.setSpacing(10)
         outer.addLayout(left_col, stretch=1)
 
-        # Top header bar
+        # Top file bar
         header = QHBoxLayout()
         header.setSpacing(10)
         self._open_btn = QPushButton("Open Video...")
         self._file_label = QLabel("Drop a video file here or click Open Video...")
         self._file_label.setObjectName("MutedLabel")
-        self._meta_badge = QLabel("No file loaded")
+        self._meta_badge = QLabel("NO SOURCE")
         self._meta_badge.setObjectName("BadgeLabel")
         header.addWidget(self._open_btn)
         header.addWidget(self._file_label, stretch=1)
         header.addWidget(self._meta_badge)
         left_col.addLayout(header)
 
-        # Video stage (dropzone <-> QVideoWidget)
+        # Video stage (horological damask dropzone <-> QVideoWidget)
         video_frame = QFrame()
         video_frame.setObjectName("VideoFrame")
         video_frame_layout = QVBoxLayout(video_frame)
         video_frame_layout.setContentsMargins(2, 2, 2, 2)
 
         self._video_stack = QStackedWidget()
-        drop_page = QWidget()
-        drop_layout = QVBoxLayout(drop_page)
+        self._drop_stage = DropStageWidget()
+        drop_layout = QVBoxLayout(self._drop_stage)
         drop_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        drop_title = QLabel("Drag & Drop Video Here")
-        drop_title.setStyleSheet("font-size: 18px; font-weight: 600; color: #dce1eb;")
+        drop_title = QLabel("DRAG & DROP VIDEO")
+        drop_title.setObjectName("DropTitle")
         drop_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        drop_sub = QLabel("Supports MP4, MOV, MKV, WebM, AVI, and GIF")
+        drop_sub = QLabel("MP4 · MOV · MKV · WebM · AVI · GIF")
         drop_sub.setObjectName("MutedLabel")
         drop_sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._drop_open_btn = QPushButton("Choose File")
+        self._drop_open_btn = QPushButton("Select Clip")
         self._drop_open_btn.setProperty("primary", True)
         drop_layout.addWidget(drop_title)
         drop_layout.addWidget(drop_sub)
-        drop_layout.addSpacing(8)
+        drop_layout.addSpacing(10)
         drop_layout.addWidget(self._drop_open_btn, alignment=Qt.AlignmentFlag.AlignCenter)
 
         self._video_widget = QVideoWidget()
         self._player.setVideoOutput(self._video_widget)
 
-        self._video_stack.addWidget(drop_page)
+        self._video_stack.addWidget(self._drop_stage)
         self._video_stack.addWidget(self._video_widget)
         video_frame_layout.addWidget(self._video_stack)
         left_col.addWidget(video_frame, stretch=1)
@@ -154,9 +187,9 @@ class MainWindow(QMainWindow):
         trim_layout.setSpacing(8)
 
         transport = QHBoxLayout()
-        transport.setSpacing(8)
+        transport.setSpacing(6)
         self._play_btn = QPushButton("Play")
-        self._play_btn.setFixedWidth(74)
+        self._play_btn.setFixedWidth(82)
         self._step_back_btn = QPushButton("-0.1s")
         self._step_fwd_btn = QPushButton("+0.1s")
         self._time_label = QLabel("00:00.00 / 00:00.00")
@@ -169,7 +202,7 @@ class MainWindow(QMainWindow):
         self._volume_slider = QSlider(Qt.Orientation.Horizontal)
         self._volume_slider.setRange(0, 100)
         self._volume_slider.setValue(80)
-        self._volume_slider.setFixedWidth(90)
+        self._volume_slider.setFixedWidth(88)
 
         transport.addWidget(self._play_btn)
         transport.addWidget(self._step_back_btn)
@@ -188,7 +221,7 @@ class MainWindow(QMainWindow):
         trim_actions.setSpacing(8)
         self._set_in_btn = QPushButton("Set In (I)")
         self._set_out_btn = QPushButton("Set Out (O)")
-        self._reset_trim_btn = QPushButton("Reset Trim")
+        self._reset_trim_btn = QPushButton("Reset")
         self._in_badge = QLabel("In: 00:00.00")
         self._in_badge.setObjectName("BadgeLabel")
         self._out_badge = QLabel("Out: 00:00.00")
@@ -210,12 +243,12 @@ class MainWindow(QMainWindow):
         # Right sidebar: Export settings
         sidebar = QFrame()
         sidebar.setObjectName("SidebarCard")
-        sidebar.setFixedWidth(340)
+        sidebar.setFixedWidth(342)
         side_layout = QVBoxLayout(sidebar)
         side_layout.setContentsMargins(14, 14, 14, 14)
         side_layout.setSpacing(12)
 
-        title = QLabel("Export Settings")
+        title = QLabel("EXPORT SETTINGS")
         title.setObjectName("SectionTitle")
         side_layout.addWidget(title)
 
@@ -295,6 +328,33 @@ class MainWindow(QMainWindow):
         side_layout.addLayout(btn_row)
 
         outer.addWidget(sidebar)
+        shell_layout.addWidget(body, stretch=1)
+
+        # 26px bottom status bar
+        status_bar = QFrame()
+        status_bar.setObjectName("StatusBar")
+        status_bar.setFixedHeight(26)
+        sb_layout = QHBoxLayout(status_bar)
+        sb_layout.setContentsMargins(10, 0, 4, 0)
+        sb_layout.setSpacing(8)
+
+        self._dial_spinner = ClockworkSpinner()
+        self._telemetry_label = QLabel("READY")
+        self._telemetry_label.setObjectName("MutedLabel")
+        self._cmd_palette_btn = QPushButton("Ctrl+K Commands")
+        self._cmd_palette_btn.setObjectName("StatusBtn")
+        self._theme_toggle_btn = QPushButton("Theme: Midnight Dark")
+        self._theme_toggle_btn.setObjectName("StatusBtn")
+        self._size_grip = QSizeGrip(status_bar)
+        self._size_grip.setFixedSize(14, 14)
+
+        sb_layout.addWidget(self._dial_spinner)
+        sb_layout.addWidget(self._telemetry_label, stretch=1)
+        sb_layout.addWidget(self._cmd_palette_btn)
+        sb_layout.addWidget(self._theme_toggle_btn)
+        sb_layout.addWidget(self._size_grip, alignment=Qt.AlignmentFlag.AlignBottom)
+
+        shell_layout.addWidget(status_bar)
 
     def _build_mp4_panel(self) -> QWidget:
         panel = QWidget()
@@ -423,6 +483,10 @@ class MainWindow(QMainWindow):
         return panel
 
     def _connect_signals(self) -> None:
+        self._title_bar.minimize_requested.connect(self.showMinimized)
+        self._title_bar.maximize_requested.connect(self._toggle_maximize)
+        self._title_bar.close_requested.connect(self.close)
+
         self._open_btn.clicked.connect(self._choose_input_file)
         self._drop_open_btn.clicked.connect(self._choose_input_file)
 
@@ -458,6 +522,9 @@ class MainWindow(QMainWindow):
         self._cancel_btn.clicked.connect(self._cancel_export)
         self._open_folder_btn.clicked.connect(self._open_output_folder)
 
+        self._cmd_palette_btn.clicked.connect(self.open_command_palette)
+        self._theme_toggle_btn.clicked.connect(self.toggle_theme)
+
     def _setup_shortcuts(self) -> None:
         self._bind_shortcut("Space", self._toggle_play_pause)
         self._bind_shortcut("I", self._set_in_at_playhead)
@@ -466,6 +533,8 @@ class MainWindow(QMainWindow):
         self._bind_shortcut("Right", lambda: self._step_by_ms(100))
         self._bind_shortcut("Shift+Left", lambda: self._step_by_ms(-1000))
         self._bind_shortcut("Shift+Right", lambda: self._step_by_ms(1000))
+        palette_sc = QShortcut(QKeySequence("Ctrl+K"), self)
+        palette_sc.activated.connect(self.open_command_palette)
 
     def _bind_shortcut(self, key: str, callback) -> None:
         shortcut = QShortcut(QKeySequence(key), self)
@@ -477,6 +546,109 @@ class MainWindow(QMainWindow):
             callback()
 
         shortcut.activated.connect(_handler)
+
+    def apply_theme(self, theme_name: ThemeName) -> None:
+        """Apply Alabaster Light or Midnight Dark theme across the entire window."""
+        self._theme = get_theme(theme_name)
+        self._settings.setValue("ui/theme", self._theme.name)
+
+        qss = build_stylesheet(self._theme)
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(qss)
+        else:
+            self.setStyleSheet(qss)
+
+        self._timeline.apply_theme(self._theme)
+        self._drop_stage.apply_theme(self._theme)
+        self._dial_spinner.set_colors(self._theme.color_secondary, self._theme.accent_cobalt)
+        self._theme_toggle_btn.setText(f"Theme: {self._theme.display_name}")
+        self._refresh_icons()
+
+    def toggle_theme(self) -> None:
+        """Switch between Midnight Dark and Alabaster Light."""
+        next_theme: ThemeName = "light" if self._theme.name == "dark" else "dark"
+        self.apply_theme(next_theme)
+
+    def _refresh_icons(self) -> None:
+        c = self._theme.text_primary
+        self._open_btn.setIcon(make_monoline_icon("open", c))
+        self._step_back_btn.setIcon(make_monoline_icon("step_back", c))
+        self._step_fwd_btn.setIcon(make_monoline_icon("step_fwd", c))
+        is_playing = self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        self._play_btn.setIcon(make_monoline_icon("pause" if is_playing else "play", c))
+        is_muted = self._audio_output.isMuted()
+        self._mute_preview_btn.setIcon(make_monoline_icon("muted" if is_muted else "volume", c))
+        theme_icon = "theme_light" if self._theme.name == "light" else "theme_dark"
+        self._theme_toggle_btn.setIcon(make_monoline_icon(theme_icon, self._theme.text_muted, size=14))
+
+    def build_command_entries(self) -> list[CommandEntry]:
+        """Return commands exposed in the Ctrl+K Command Palette."""
+        return [
+            CommandEntry("Open Video File...", "Click", self._choose_input_file),
+            CommandEntry("Play / Pause Preview", "Space", self._toggle_play_pause),
+            CommandEntry("Set In Point at Playhead", "I", self._set_in_at_playhead),
+            CommandEntry("Set Out Point at Playhead", "O", self._set_out_at_playhead),
+            CommandEntry("Reset Trim Range", "", self._reset_trim),
+            CommandEntry("Format: MP4 Video", "", lambda: self._select_format_pill("mp4")),
+            CommandEntry("Format: GIF Animation", "", lambda: self._select_format_pill("gif")),
+            CommandEntry("MP4 Preset: Original Quality", "", lambda: self._select_mp4_preset("original")),
+            CommandEntry("MP4 Preset: 10 MB (Discord)", "", lambda: self._select_mp4_preset("10")),
+            CommandEntry("MP4 Preset: 15 MB", "", lambda: self._select_mp4_preset("15")),
+            CommandEntry("MP4 Preset: 20 MB", "", lambda: self._select_mp4_preset("20")),
+            CommandEntry("Export Current Clip", "", self._start_export),
+            CommandEntry("Toggle Light / Dark Theme", "", self.toggle_theme),
+        ]
+
+    def open_command_palette(self) -> None:
+        """Show the floating Ctrl+K command dial centered over the window."""
+        palette = CommandPalette(self, self.build_command_entries(), self._theme)
+        geo = self.geometry()
+        palette.move(
+            geo.center().x() - palette.width() // 2,
+            geo.top() + 80,
+        )
+        palette.exec()
+
+    def _select_format_pill(self, fmt: Literal["mp4", "gif"]) -> None:
+        self._fmt_mp4_btn.setChecked(fmt == "mp4")
+        self._fmt_gif_btn.setChecked(fmt == "gif")
+        self._set_output_format(fmt)
+
+    def _select_mp4_preset(self, key: str) -> None:
+        self._select_format_pill("mp4")
+        if key in self._size_buttons:
+            self._size_buttons[key].setChecked(True)
+            self._on_mp4_size_changed()
+
+    def _toggle_maximize(self) -> None:
+        if self.isMaximized():
+            self.showNormal()
+            self._title_bar.set_maximized_state(False)
+        else:
+            self.showMaximized()
+            self._title_bar.set_maximized_state(True)
+
+    def _edges_at(self, pos) -> Qt.Edge:
+        edges = Qt.Edge(0)
+        if pos.x() <= _RESIZE_MARGIN:
+            edges |= Qt.Edge.LeftEdge
+        elif pos.x() >= self.width() - _RESIZE_MARGIN:
+            edges |= Qt.Edge.RightEdge
+        if pos.y() <= _RESIZE_MARGIN:
+            edges |= Qt.Edge.TopEdge
+        elif pos.y() >= self.height() - _RESIZE_MARGIN:
+            edges |= Qt.Edge.BottomEdge
+        return edges
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and not self.isMaximized():
+            edges = self._edges_at(event.position().toPoint())
+            if edges != Qt.Edge(0) and self.windowHandle() is not None:
+                self.windowHandle().startSystemResize(edges)
+                event.accept()
+                return
+        super().mousePressEvent(event)
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if event.mimeData().hasUrls():
@@ -526,8 +698,11 @@ class MainWindow(QMainWindow):
 
         self._file_label.setText(path.name)
         self._file_label.setToolTip(str(path))
+        self._title_bar.set_document_title(path.name)
         size_str = format_file_size(info.file_size_bytes)
-        self._meta_badge.setText(f"{info.width}x{info.height} • {info.fps:.0f}fps • {size_str}")
+        meta_text = f"{info.width}x{info.height} · {info.fps:.0f}fps · {size_str}"
+        self._meta_badge.setText(meta_text)
+        self._telemetry_label.setText(f"LOADED · {meta_text}")
 
         self._timeline.set_duration(self._duration_ms)
         self._on_trim_changed(0, self._duration_ms)
@@ -581,6 +756,7 @@ class MainWindow(QMainWindow):
         muted = not self._audio_output.isMuted()
         self._audio_output.setMuted(muted)
         self._mute_preview_btn.setText("Unmute" if muted else "Mute")
+        self._refresh_icons()
 
     def _set_in_at_playhead(self) -> None:
         if self._video_info is None:
@@ -626,7 +802,11 @@ class MainWindow(QMainWindow):
             self._update_time_label(self._player.position())
 
     def _on_playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
-        self._play_btn.setText("Pause" if state == QMediaPlayer.PlaybackState.PlayingState else "Play")
+        is_playing = state == QMediaPlayer.PlaybackState.PlayingState
+        self._play_btn.setText("Pause" if is_playing else "Play")
+        self._play_btn.setIcon(
+            make_monoline_icon("pause" if is_playing else "play", self._theme.text_primary)
+        )
 
     def _update_time_label(self, pos_ms: int) -> None:
         self._time_label.setText(
@@ -768,6 +948,8 @@ class MainWindow(QMainWindow):
         self._progress_bar.setValue(0)
         self._progress_bar.setVisible(True)
         self._status_label.setText("Starting export...")
+        self._telemetry_label.setText("ENCODING · RUNNING")
+        self._dial_spinner.set_active(True)
         self._set_exporting_state(True)
 
         self._worker = ExportWorker(options)
@@ -791,21 +973,25 @@ class MainWindow(QMainWindow):
     def _on_export_progress(self, pct: int, message: str) -> None:
         self._progress_bar.setValue(pct)
         self._status_label.setText(message)
+        self._telemetry_label.setText(f"ENCODING · {pct}%")
 
     def _on_export_success(self, output_path: str, size_bytes: int) -> None:
         self._set_exporting_state(False)
+        self._dial_spinner.set_active(False)
         self._progress_bar.setValue(100)
         self._status_label.setText("Done.")
         self._last_exported_path = Path(output_path)
-        self._result_label.setText(
-            f"Saved {self._last_exported_path.name} ({format_file_size(size_bytes)})"
-        )
+        size_text = format_file_size(size_bytes)
+        self._result_label.setText(f"Saved {self._last_exported_path.name} ({size_text})")
+        self._telemetry_label.setText(f"READY · LAST EXPORT {size_text}")
         self._result_widget.setVisible(True)
 
     def _on_export_error(self, message: str) -> None:
         self._set_exporting_state(False)
+        self._dial_spinner.set_active(False)
         self._progress_bar.setVisible(False)
         self._status_label.setText(message)
+        self._telemetry_label.setText("READY")
         if message != "Export cancelled.":
             QMessageBox.critical(self, "Export Failed", message)
 

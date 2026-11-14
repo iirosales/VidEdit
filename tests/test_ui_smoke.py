@@ -1,4 +1,4 @@
-"""Headless UI smoke tests for MainWindow and TrimTimelineWidget."""
+"""Headless UI smoke tests for MainWindow, TrimTimelineWidget, themes, and CommandPalette."""
 
 from __future__ import annotations
 
@@ -13,7 +13,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
 from videdit.ffmpeg_tools import find_ffmpeg_binaries
+from videdit.ui.chrome import CommandPalette
+from videdit.ui.icons import ClockworkSpinner, make_monoline_icon
 from videdit.ui.main_window import MainWindow, format_file_size, format_timestamp_ms
+from videdit.ui.theme import DARK_THEME, LIGHT_THEME, build_stylesheet
 from videdit.ui.timeline import TrimTimelineWidget
 
 
@@ -31,6 +34,25 @@ def test_formatters() -> None:
     assert format_timestamp_ms(3_661_250) == "01:01:01.25"
     assert format_file_size(500) == "500 B"
     assert format_file_size(10_500_000) == "10.50 MB"
+
+
+def test_dual_theme_stylesheets(qt_app: QApplication) -> None:
+    light_qss = build_stylesheet(LIGHT_THEME)
+    dark_qss = build_stylesheet(DARK_THEME)
+    assert "#FAF9FC" in light_qss
+    assert "#1B54B8" in light_qss
+    assert "#9E1933" in light_qss
+    assert "#110E16" in dark_qss
+    assert "#3D7EFF" in dark_qss
+    assert "#E0284A" in dark_qss
+
+
+def test_monoline_icons_and_spinner(qt_app: QApplication) -> None:
+    for name in ("play", "pause", "step_back", "step_fwd", "open", "volume", "muted", "theme_light", "theme_dark"):
+        assert not make_monoline_icon(name, "#F4F1F8").isNull()
+    spinner = ClockworkSpinner()
+    spinner.set_active(True)
+    spinner.set_active(False)
 
 
 def test_timeline_clamping(qt_app: QApplication) -> None:
@@ -71,11 +93,27 @@ def test_main_window_loads_video_and_switches_presets(qt_app: QApplication, tmp_
         check=True,
     )
 
-    win = MainWindow()
+    win = MainWindow(initial_theme="dark")
     if (Path(__file__).resolve().parent.parent / "favicon.ico").is_file():
         assert not win.windowIcon().isNull()
     assert win._step_back_btn.text() == "-0.1s"
     assert win._step_fwd_btn.text() == "+0.1s"
+    assert win._theme.name == "dark"
+
+    win.toggle_theme()
+    assert win._theme.name == "light"
+    assert "Alabaster Light" in win._theme_toggle_btn.text()
+
+    win.toggle_theme()
+    assert win._theme.name == "dark"
+
+    # Command palette filtering smoke test
+    palette = CommandPalette(win, win.build_command_entries(), win._theme)
+    palette._search.setText("10 MB")
+    assert palette._list.count() == 1
+    assert "10 MB" in palette._list.item(0).text()
+    palette.close()
+
     win.load_video(clip)
 
     assert win._video_info is not None

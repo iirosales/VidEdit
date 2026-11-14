@@ -1,22 +1,24 @@
-"""Custom dual-handle timeline scrubber widget for In/Out video trimming."""
+"""Custom dual-handle timeline scrubber widget with heterochromatic In/Out markers."""
 
 from __future__ import annotations
 
 from typing import Literal, Optional
 
-from PySide6.QtCore import QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPen
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QLinearGradient, QMouseEvent, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import QWidget
+
+from videdit.ui.theme import DARK_THEME, ThemeTokens
 
 
 class TrimTimelineWidget(QWidget):
-    """Interactive timeline with draggable In/Out trim handles and a scrubbable playhead."""
+    """Interactive timeline with Cobalt In / Crimson Out handles and a diamond-tip playhead."""
 
     seek_requested = Signal(int)
     trim_changed = Signal(int, int)
 
     _PAD_X = 14
-    _HANDLE_WIDTH = 12
+    _HANDLE_WIDTH = 10
     _MIN_CLIP_MS = 200
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
@@ -31,6 +33,12 @@ class TrimTimelineWidget(QWidget):
         self._in_ms: int = 0
         self._out_ms: int = 0
         self._dragging: Optional[Literal["in", "out", "playhead"]] = None
+        self._theme: ThemeTokens = DARK_THEME
+
+    def apply_theme(self, theme: ThemeTokens) -> None:
+        """Update timeline palette from active ThemeTokens."""
+        self._theme = theme
+        self.update()
 
     def set_duration(self, duration_ms: int) -> None:
         """Reset timeline bounds for a newly loaded video."""
@@ -91,7 +99,7 @@ class TrimTimelineWidget(QWidget):
         out_x = self._ms_to_x(self._out_ms)
         dist_in = abs(x - in_x)
         dist_out = abs(x - out_x)
-        hit_radius = self._HANDLE_WIDTH + 2
+        hit_radius = self._HANDLE_WIDTH + 3
 
         if dist_in <= hit_radius and dist_in <= dist_out:
             return "in"
@@ -154,11 +162,21 @@ class TrimTimelineWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
+        t = self._theme
         track = self._track_rect()
-        # Base inactive track
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#222631"))
-        painter.drawRoundedRect(track, 5.0, 5.0)
+
+        # Recessed architectural track with 1px border
+        painter.setPen(QPen(QColor(t.border_subtle), 1.0))
+        painter.setBrush(QColor(t.bg_recessed))
+        painter.drawRoundedRect(track, 2.0, 2.0)
+
+        # Subtle horological ruler ticks along track
+        tick_pen = QPen(QColor(t.border_hover), 1.0)
+        painter.setPen(tick_pen)
+        for idx in range(1, 12):
+            tx = track.left() + (track.width() * idx) / 12.0
+            tick_h = 6.0 if idx % 3 == 0 else 3.0
+            painter.drawLine(QPointF(tx, track.bottom() - tick_h), QPointF(tx, track.bottom() - 1.0))
 
         if self._duration_ms <= 0:
             painter.end()
@@ -168,27 +186,43 @@ class TrimTimelineWidget(QWidget):
         out_x = self._ms_to_x(self._out_ms)
         pos_x = self._ms_to_x(self._position_ms)
 
-        # Selected keep region
-        keep_rect = QRectF(in_x, track.top(), max(2.0, out_x - in_x), track.height())
-        painter.setBrush(QColor(88, 101, 242, 95))
+        # Heterochromatic Cobalt-to-Crimson gradient fill for kept span
+        span_w = max(2.0, out_x - in_x)
+        keep_rect = QRectF(in_x, track.top(), span_w, track.height())
+        fill_grad = QLinearGradient(in_x, 0.0, out_x, 0.0)
+        fill_grad.setColorAt(0.0, QColor(*t.timeline_span_start))
+        fill_grad.setColorAt(1.0, QColor(*t.timeline_span_end))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(fill_grad)
         painter.drawRect(keep_rect)
 
-        # Top/bottom accent border on kept span
-        painter.setPen(QPen(QColor("#5865f2"), 2.0))
-        painter.drawLine(int(in_x), int(track.top()), int(out_x), int(track.top()))
-        painter.drawLine(int(in_x), int(track.bottom()), int(out_x), int(track.bottom()))
+        # Split Cobalt-to-Crimson top & bottom hairline borders
+        edge_grad = QLinearGradient(in_x, 0.0, out_x, 0.0)
+        edge_grad.setColorAt(0.0, QColor(t.accent_cobalt))
+        edge_grad.setColorAt(1.0, QColor(t.accent_crimson))
+        painter.setPen(QPen(edge_grad, 1.75))
+        painter.drawLine(QPointF(in_x, track.top()), QPointF(out_x, track.top()))
+        painter.drawLine(QPointF(in_x, track.bottom()), QPointF(out_x, track.bottom()))
 
-        # In handle (emerald green)
-        self._draw_trim_handle(painter, in_x, track, QColor("#3ba55d"), is_left=True)
-        # Out handle (warm amber)
-        self._draw_trim_handle(painter, out_x, track, QColor("#faa61a"), is_left=False)
+        # Heterochromatic In (Cobalt) and Out (Crimson) handles
+        self._draw_trim_handle(painter, in_x, track, QColor(t.accent_cobalt), is_left=True)
+        self._draw_trim_handle(painter, out_x, track, QColor(t.accent_crimson), is_left=False)
 
-        # Playhead needle
-        painter.setPen(QPen(QColor("#ffffff"), 2.0))
-        painter.drawLine(int(pos_x), int(track.top() - 8), int(pos_x), int(track.bottom() + 8))
+        # Sharp playhead needle with diamond crown vertex
+        needle_color = QColor(t.color_primary)
+        painter.setPen(QPen(needle_color, 1.5))
+        painter.drawLine(QPointF(pos_x, track.top() - 7.0), QPointF(pos_x, track.bottom() + 7.0))
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#ffffff"))
-        painter.drawEllipse(QRectF(pos_x - 4.0, track.top() - 10.0, 8.0, 8.0))
+        painter.setBrush(needle_color)
+        diamond = QPolygonF(
+            [
+                QPointF(pos_x, track.top() - 12.0),
+                QPointF(pos_x + 4.0, track.top() - 8.0),
+                QPointF(pos_x, track.top() - 4.0),
+                QPointF(pos_x - 4.0, track.top() - 8.0),
+            ]
+        )
+        painter.drawPolygon(diamond)
 
         painter.end()
 
@@ -207,16 +241,14 @@ class TrimTimelineWidget(QWidget):
             w,
             track.height() + 8.0,
         )
-        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setPen(QPen(QColor(self._theme.bg_canvas), 1.0))
         painter.setBrush(color)
-        painter.drawRoundedRect(handle_rect, 4.0, 4.0)
+        painter.drawRoundedRect(handle_rect, 2.0, 2.0)
 
-        # Subtle grip line
-        painter.setPen(QPen(QColor("#111318"), 1.5))
+        # Fine mechanical grip tick
+        painter.setPen(QPen(QColor("#FAF9FC"), 1.2))
         cx = handle_rect.center().x()
         painter.drawLine(
-            int(cx),
-            int(handle_rect.top() + 6),
-            int(cx),
-            int(handle_rect.bottom() - 6),
+            QPointF(cx, handle_rect.top() + 6.0),
+            QPointF(cx, handle_rect.bottom() - 6.0),
         )
