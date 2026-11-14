@@ -72,6 +72,8 @@ def test_main_window_loads_video_and_switches_presets(qt_app: QApplication, tmp_
     )
 
     win = MainWindow()
+    if (Path(__file__).resolve().parent.parent / "favicon.ico").is_file():
+        assert not win.windowIcon().isNull()
     assert win._step_back_btn.text() == "-0.1s"
     assert win._step_fwd_btn.text() == "+0.1s"
     win.load_video(clip)

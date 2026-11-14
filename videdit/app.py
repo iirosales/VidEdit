@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import ctypes
 import sys
 from pathlib import Path
+from typing import Optional
 
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from videdit.ffmpeg_tools import find_ffmpeg_binaries
@@ -12,11 +15,33 @@ from videdit.ui.main_window import MainWindow
 from videdit.ui.styles import DARK_STYLESHEET
 
 
+def resolve_app_icon_path() -> Optional[Path]:
+    """Return the path to favicon.ico in the project root if present."""
+    candidate = Path(__file__).resolve().parent.parent / "favicon.ico"
+    return candidate if candidate.is_file() else None
+
+
+def _set_windows_app_user_model_id() -> None:
+    """Assign an explicit Windows AppUserModelID so the taskbar uses VidEdit's icon instead of Python's."""
+    if sys.platform != "win32":
+        return
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("iirosales.VidEdit.App.1")
+    except (AttributeError, OSError):
+        pass
+
+
 def main() -> int:
     """Launch the VidEdit desktop GUI."""
+    _set_windows_app_user_model_id()
+
     app = QApplication(sys.argv)
     app.setApplicationName("VidEdit")
     app.setStyleSheet(DARK_STYLESHEET)
+
+    icon_path = resolve_app_icon_path()
+    if icon_path is not None:
+        app.setWindowIcon(QIcon(str(icon_path)))
 
     ffmpeg_path, ffprobe_path = find_ffmpeg_binaries()
     if not ffmpeg_path or not ffprobe_path:

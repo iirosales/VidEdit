@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Literal, Optional
 
 from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QDragEnterEvent, QDropEvent, QKeySequence, QShortcut
+from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QKeySequence, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -66,6 +66,9 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("VidEdit — Cut, GIF & Discord Compressor")
+        icon_path = Path(__file__).resolve().parent.parent.parent / "favicon.ico"
+        if icon_path.is_file():
+            self.setWindowIcon(QIcon(str(icon_path)))
         self.resize(1140, 720)
         self.setMinimumSize(920, 620)
         self.setAcceptDrops(True)
