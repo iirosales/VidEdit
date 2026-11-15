@@ -9,10 +9,12 @@ from pathlib import Path
 import pytest
 
 from videdit.ffmpeg_tools import (
+    CropRect,
     build_gif_cmd,
     build_mp4_quality_cmd,
     build_mp4_two_pass_cmds,
     calculate_mp4_encoding_plan,
+    normalize_crop_rect,
     parse_ffmpeg_progress_line,
     parse_ffprobe_json,
 )
@@ -155,3 +157,36 @@ def test_parse_ffmpeg_progress_line() -> None:
     assert parse_ffmpeg_progress_line("out_time_us=15000000\n", 10.0) == pytest.approx(1.0)
     assert parse_ffmpeg_progress_line("progress=end\n", 10.0) == pytest.approx(1.0)
     assert parse_ffmpeg_progress_line("frame=12\n", 10.0) is None
+
+
+def test_normalize_crop_rect_and_ffmpeg_filters() -> None:
+    assert normalize_crop_rect(CropRect(0, 0, 1280, 720), 1280, 720) is None
+
+    odd_crop = normalize_crop_rect(CropRect(101, 51, 303, 205), 1280, 720)
+    assert odd_crop == CropRect(100, 50, 302, 204)
+
+    mp4_cmd = build_mp4_quality_cmd(
+        ffmpeg_path="ffmpeg",
+        input_path=Path("in.mp4"),
+        output_path=Path("out.mp4"),
+        start_sec=0.0,
+        duration_sec=2.0,
+        has_audio=True,
+        mute_audio=False,
+        crop=odd_crop,
+    )
+    vf = mp4_cmd[mp4_cmd.index("-vf") + 1]
+    assert vf.startswith("crop=302:204:100:50,")
+
+    gif_cmd = build_gif_cmd(
+        ffmpeg_path="ffmpeg",
+        input_path=Path("in.mp4"),
+        output_path=Path("out.gif"),
+        start_sec=0.0,
+        duration_sec=2.0,
+        fps=15,
+        max_width=None,
+        crop=odd_crop,
+    )
+    fc = gif_cmd[gif_cmd.index("-filter_complex") + 1]
+    assert fc.startswith("[0:v]crop=302:204:100:50,fps=15,")

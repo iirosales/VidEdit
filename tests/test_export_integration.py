@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from videdit.exporter import ExportOptions, execute_export
-from videdit.ffmpeg_tools import find_ffmpeg_binaries, probe_video
+from videdit.ffmpeg_tools import CropRect, find_ffmpeg_binaries, probe_video
 
 
 @pytest.fixture()
@@ -106,3 +106,42 @@ def test_integration_export_gif(sample_video: Path, tmp_path: Path) -> None:
     assert result.read_bytes()[:6] in (b"GIF87a", b"GIF89a")
     out_info = probe_video(result)
     assert out_info.width == 480
+
+
+def test_integration_export_cropped_mp4_and_gif(sample_video: Path, tmp_path: Path) -> None:
+    info = probe_video(sample_video)
+
+    mp4_out = tmp_path / "cropped.mp4"
+    execute_export(
+        ExportOptions(
+            input_path=sample_video,
+            output_path=mp4_out,
+            start_sec=0.5,
+            end_sec=2.0,
+            output_format="mp4",
+            video_info=info,
+            crop=CropRect(x=101, y=51, width=401, height=301),
+            target_size_mb=None,
+        )
+    )
+    mp4_info = probe_video(mp4_out)
+    assert mp4_info.width == 400
+    assert mp4_info.height == 300
+
+    gif_out = tmp_path / "cropped.gif"
+    execute_export(
+        ExportOptions(
+            input_path=sample_video,
+            output_path=gif_out,
+            start_sec=0.5,
+            end_sec=2.0,
+            output_format="gif",
+            video_info=info,
+            crop=CropRect(x=120, y=80, width=320, height=240),
+            gif_fps=12,
+            gif_max_width=None,
+        )
+    )
+    gif_info = probe_video(gif_out)
+    assert gif_info.width == 320
+    assert gif_info.height == 240

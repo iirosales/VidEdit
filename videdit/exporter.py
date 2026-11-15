@@ -13,12 +13,14 @@ from typing import Literal, Optional
 from PySide6.QtCore import QThread, Signal
 
 from videdit.ffmpeg_tools import (
+    CropRect,
     VideoInfo,
     build_gif_cmd,
     build_mp4_quality_cmd,
     build_mp4_two_pass_cmds,
     calculate_mp4_encoding_plan,
     find_ffmpeg_binaries,
+    normalize_crop_rect,
     parse_ffmpeg_progress_line,
 )
 
@@ -33,6 +35,7 @@ class ExportOptions:
     end_sec: float
     output_format: Literal["mp4", "gif"]
     video_info: VideoInfo
+    crop: Optional[CropRect] = None
     # MP4 options
     target_size_mb: Optional[float] = None  # None => high quality CRF
     max_height: Optional[int] = None        # None => Auto (when target size) or Original
@@ -136,6 +139,14 @@ def execute_export(
         raise FileNotFoundError("ffmpeg executable was not found.")
 
     duration_sec = max(0.1, options.end_sec - options.start_sec)
+    normalized_crop = normalize_crop_rect(
+        options.crop,
+        options.video_info.width,
+        options.video_info.height,
+    )
+    effective_height = (
+        normalized_crop.height if normalized_crop is not None else options.video_info.height
+    )
     options.output_path.parent.mkdir(parents=True, exist_ok=True)
 
     def emit(pct: int, msg: str) -> None:
@@ -154,6 +165,7 @@ def execute_export(
                 has_audio=options.video_info.has_audio,
                 mute_audio=options.mute_audio,
                 scale_height=options.max_height,
+                crop=normalized_crop,
             )
             rc, err = run_ffmpeg_with_progress(
                 cmd,
@@ -180,7 +192,7 @@ def execute_export(
                     target_mb=options.target_size_mb,
                     has_audio=options.video_info.has_audio,
                     mute_audio=options.mute_audio,
-                    source_height=options.video_info.height,
+                    source_height=effective_height,
                     max_height=options.max_height,
                     auto_scale=options.auto_scale_for_target,
                     safety_factor=safety_factor,
@@ -193,6 +205,7 @@ def execute_export(
                     duration_sec=duration_sec,
                     plan=plan,
                     passlog_prefix=passlog_prefix,
+                    crop=normalized_crop,
                 )
 
                 label_suffix = " (tightening fit)" if attempt > 0 else ""
@@ -260,6 +273,7 @@ def execute_export(
             duration_sec=duration_sec,
             fps=cand_fps,
             max_width=cand_width,
+            crop=normalized_crop,
         )
         rc, err = run_ffmpeg_with_progress(
             cmd,

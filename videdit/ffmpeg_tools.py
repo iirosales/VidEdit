@@ -64,6 +64,49 @@ class VideoInfo:
     video_codec: str
 
 
+@dataclass(frozen=True)
+class CropRect:
+    """Pixel crop rectangle in source video coordinates."""
+
+    x: int
+    y: int
+    width: int
+    height: int
+
+    def to_ffmpeg_filter(self) -> str:
+        """Return an FFmpeg crop filter expression."""
+        return f"crop={self.width}:{self.height}:{self.x}:{self.y}"
+
+
+def normalize_crop_rect(
+    crop: Optional[CropRect],
+    source_width: int,
+    source_height: int,
+    min_size: int = 16,
+) -> Optional[CropRect]:
+    """Clamp and even-align a crop rect to source bounds; return None if full-frame."""
+    if crop is None or source_width <= 0 or source_height <= 0:
+        return None
+
+    min_w = min(source_width, max(2, min_size))
+    min_h = min(source_height, max(2, min_size))
+
+    x = max(0, min(int(crop.x), source_width - min_w))
+    y = max(0, min(int(crop.y), source_height - min_h))
+    w = max(min_w, min(int(crop.width), source_width - x))
+    h = max(min_h, min(int(crop.height), source_height - y))
+
+    x = (x // 2) * 2
+    y = (y // 2) * 2
+    w = max(2, (min(w, source_width - x) // 2) * 2)
+    h = max(2, (min(h, source_height - y) // 2) * 2)
+
+    if x == 0 and y == 0 and w >= source_width - 1 and h >= source_height - 1:
+        return None
+
+    return CropRect(x=x, y=y, width=w, height=h)
+
+
 def _parse_fps(rate_str: str) -> float:
     """Parse an ffprobe rational frame-rate string such as '30000/1001'."""
     if not rate_str or rate_str == "0/0":
@@ -236,6 +279,15 @@ def _video_scale_filter(scale_height: Optional[int]) -> str:
     return "scale=trunc(iw/2)*2:trunc(ih/2)*2"
 
 
+def _build_mp4_vf(scale_height: Optional[int], crop: Optional[CropRect] = None) -> str:
+    """Compose optional source crop followed by even-dimension scale filter."""
+    parts: list[str] = []
+    if crop is not None:
+        parts.append(crop.to_ffmpeg_filter())
+    parts.append(_video_scale_filter(scale_height))
+    return ",".join(parts)
+
+
 def build_mp4_quality_cmd(
     ffmpeg_path: str,
     input_path: Path,
@@ -246,6 +298,7 @@ def build_mp4_quality_cmd(
     mute_audio: bool,
     scale_height: Optional[int] = None,
     crf: int = 20,
+    crop: Optional[CropRect] = None,
 ) -> list[str]:
     """Build a single-pass high-quality H.264 MP4 trim command."""
     cmd = [
@@ -258,7 +311,7 @@ def build_mp4_quality_cmd(
         "-t",
         f"{duration_sec:.3f}",
         "-vf",
-        _video_scale_filter(scale_height),
+        _build_mp4_vf(scale_height, crop=crop),
         "-c:v",
         "libx264",
         "-preset",
@@ -285,6 +338,7 @@ def build_mp4_two_pass_cmds(
     duration_sec: float,
     plan: Mp4Plan,
     passlog_prefix: Path,
+    crop: Optional[CropRect] = None,
 ) -> tuple[list[str], list[str]]:
     """Build Pass 1 and Pass 2 FFmpeg commands for size-targeted MP4 compression."""
     common_input = [
@@ -297,7 +351,7 @@ def build_mp4_two_pass_cmds(
         "-t",
         f"{duration_sec:.3f}",
         "-vf",
-        _video_scale_filter(plan.scale_height),
+        _build_mp4_vf(plan.scale_height, crop=crop),
         "-c:v",
         "libx264",
         "-preset",
@@ -345,11 +399,13 @@ def build_gif_cmd(
     duration_sec: float,
     fps: int = 15,
     max_width: Optional[int] = 480,
+    crop: Optional[CropRect] = None,
 ) -> list[str]:
     """Build a 2-pass palettegen/paletteuse GIF export command."""
     width_expr = f"'min(iw,{max_width})'" if max_width and max_width > 0 else "iw"
+    crop_prefix = f"{crop.to_ffmpeg_filter()}," if crop is not None else ""
     filter_complex = (
-        f"[0:v]fps={fps},scale={width_expr}:-1:flags=lanczos,"
+        f"[0:v]{crop_prefix}fps={fps},scale={width_expr}:-1:flags=lanczos,"
         f"split[s0][s1];"
         f"[s0]palettegen=stats_mode=diff[p];"
         f"[s1][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle"
