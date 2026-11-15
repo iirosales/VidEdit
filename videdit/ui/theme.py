@@ -109,10 +109,6 @@ def get_theme(name: str) -> ThemeTokens:
 
 def build_stylesheet(t: ThemeTokens) -> str:
     """Generate the Qt stylesheet for the given ThemeTokens."""
-    hover_grad = (
-        f"qlineargradient(x1:0, y1:0, x2:1, y2:0, "
-        f"stop:0 {t.accent_cobalt}, stop:1 {t.accent_crimson})"
-    )
     display_font = resolve_font_family(("Cinzel", "Cormorant Garamond", "Georgia"), "Georgia")
     ui_font = resolve_font_family(("Plus Jakarta Sans", "Inter", "Segoe UI"), "Segoe UI")
     mono_font = resolve_font_family(("JetBrains Mono", "Cascadia Mono", "Consolas"), "Consolas")
@@ -246,7 +242,7 @@ QPushButton {{
 
 QPushButton:hover {{
     background-color: {t.bg_popover};
-    border: 1px solid {hover_grad};
+    border: 1px solid {t.border_hover};
 }}
 
 QPushButton:pressed {{
@@ -259,6 +255,12 @@ QPushButton:disabled {{
     border-color: {t.border_subtle};
 }}
 
+QPushButton[danger="true"]:hover {{
+    background-color: {t.bg_popover};
+    border: 1px solid {t.accent_crimson};
+    color: {t.accent_crimson};
+}}
+
 QPushButton[primary="true"] {{
     background-color: {t.color_primary};
     border: 1px solid {t.border_hover};
@@ -269,7 +271,7 @@ QPushButton[primary="true"] {{
 }}
 
 QPushButton[primary="true"]:hover {{
-    border: 1px solid {hover_grad};
+    border: 1px solid {t.accent_cobalt};
 }}
 
 QPushButton[primary="true"]:disabled {{
@@ -287,13 +289,14 @@ QPushButton[pill="true"] {{
 }}
 
 QPushButton[pill="true"]:hover {{
-    border: 1px solid {hover_grad};
+    background-color: {t.bg_popover};
+    border: 1px solid {t.border_hover};
     color: {t.text_primary};
 }}
 
 QPushButton[pill="true"]:checked {{
     background-color: {t.bg_canvas};
-    border: 1px solid {t.accent_cobalt};
+    border: 1px solid {t.border_hover};
     border-bottom: 2px solid {t.accent_cobalt};
     color: {t.text_primary};
     font-weight: 600;
@@ -311,7 +314,7 @@ QPushButton#StatusBtn {{
 
 QPushButton#StatusBtn:hover {{
     background-color: {t.bg_surface};
-    border: 1px solid {hover_grad};
+    border: 1px solid {t.border_hover};
     color: {t.text_primary};
 }}
 
@@ -373,7 +376,7 @@ QProgressBar {{
 }}
 
 QProgressBar::chunk {{
-    background-color: {hover_grad};
+    background-color: {t.accent_cobalt};
     border-radius: 1px;
 }}
 
@@ -413,7 +416,6 @@ QListWidget#CommandList::item {{
 QListWidget#CommandList::item:selected {{
     background-color: {t.bg_surface};
     border-left: 2px solid {t.accent_cobalt};
-    border-right: 2px solid {t.accent_crimson};
     color: {t.text_primary};
 }}
 """

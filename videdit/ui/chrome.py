@@ -205,8 +205,8 @@ class CommandPalette(QDialog):
         frame.setStyleSheet(
             f"QFrame {{"
             f"  background-color: {theme.bg_popover};"
-            f"  border: 1px solid qlineargradient(x1:0, y1:0, x2:1, y2:0, "
-            f"    stop:0 {theme.accent_cobalt}, stop:1 {theme.accent_crimson});"
+            f"  border: 1px solid {theme.border_hover};"
+            f"  border-top: 2px solid {theme.accent_cobalt};"
             f"  border-radius: 3px;"
             f"}}"
         )

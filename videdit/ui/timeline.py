@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Literal, Optional
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QLinearGradient, QMouseEvent, QPainter, QPen, QPolygonF
+from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import QWidget
 
 from videdit.ui.theme import DARK_THEME, ThemeTokens
@@ -186,30 +186,26 @@ class TrimTimelineWidget(QWidget):
         out_x = self._ms_to_x(self._out_ms)
         pos_x = self._ms_to_x(self._position_ms)
 
-        # Heterochromatic Cobalt-to-Crimson gradient fill for kept span
+        # Translucent brushed-silver / porcelain span (no gradient smear)
         span_w = max(2.0, out_x - in_x)
         keep_rect = QRectF(in_x, track.top(), span_w, track.height())
-        fill_grad = QLinearGradient(in_x, 0.0, out_x, 0.0)
-        fill_grad.setColorAt(0.0, QColor(*t.timeline_span_start))
-        fill_grad.setColorAt(1.0, QColor(*t.timeline_span_end))
+        span_fill = QColor(t.color_secondary)
+        span_fill.setAlpha(44 if t.name == "dark" else 38)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(fill_grad)
+        painter.setBrush(span_fill)
         painter.drawRect(keep_rect)
 
-        # Split Cobalt-to-Crimson top & bottom hairline borders
-        edge_grad = QLinearGradient(in_x, 0.0, out_x, 0.0)
-        edge_grad.setColorAt(0.0, QColor(t.accent_cobalt))
-        edge_grad.setColorAt(1.0, QColor(t.accent_crimson))
-        painter.setPen(QPen(edge_grad, 1.75))
+        # Crisp silver hairline borders on kept span
+        painter.setPen(QPen(QColor(t.color_secondary), 1.25))
         painter.drawLine(QPointF(in_x, track.top()), QPointF(out_x, track.top()))
         painter.drawLine(QPointF(in_x, track.bottom()), QPointF(out_x, track.bottom()))
 
-        # Heterochromatic In (Cobalt) and Out (Crimson) handles
+        # Brushed pewter In/Out brackets with tiny Cobalt (In) and Crimson (Out) jewel pips
         self._draw_trim_handle(painter, in_x, track, QColor(t.accent_cobalt), is_left=True)
         self._draw_trim_handle(painter, out_x, track, QColor(t.accent_crimson), is_left=False)
 
-        # Sharp playhead needle with diamond crown vertex
-        needle_color = QColor(t.color_primary)
+        # Sharp Cobalt chronometer playhead needle with diamond crown tip
+        needle_color = QColor(t.accent_cobalt)
         painter.setPen(QPen(needle_color, 1.5))
         painter.drawLine(QPointF(pos_x, track.top() - 7.0), QPointF(pos_x, track.bottom() + 7.0))
         painter.setPen(Qt.PenStyle.NoPen)
@@ -231,9 +227,10 @@ class TrimTimelineWidget(QWidget):
         painter: QPainter,
         x: float,
         track: QRectF,
-        color: QColor,
+        pip_color: QColor,
         is_left: bool,
     ) -> None:
+        t = self._theme
         w = float(self._HANDLE_WIDTH)
         handle_rect = QRectF(
             x - (w if is_left else 0.0),
@@ -241,14 +238,21 @@ class TrimTimelineWidget(QWidget):
             w,
             track.height() + 8.0,
         )
-        painter.setPen(QPen(QColor(self._theme.bg_canvas), 1.0))
-        painter.setBrush(color)
+        body_color = QColor(t.bg_popover if t.name == "dark" else "#FAF9FC")
+        painter.setPen(QPen(QColor(t.border_hover), 1.0))
+        painter.setBrush(body_color)
         painter.drawRoundedRect(handle_rect, 2.0, 2.0)
 
-        # Fine mechanical grip tick
-        painter.setPen(QPen(QColor("#FAF9FC"), 1.2))
+        # Tiny jewel pip at top edge of bracket (Cobalt for In, Crimson for Out)
+        pip_rect = QRectF(handle_rect.left() + 1.0, handle_rect.top() + 1.0, w - 2.0, 3.0)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(pip_color)
+        painter.drawRect(pip_rect)
+
+        # Fine silver grip line
+        painter.setPen(QPen(QColor(t.color_secondary), 1.1))
         cx = handle_rect.center().x()
         painter.drawLine(
-            QPointF(cx, handle_rect.top() + 6.0),
-            QPointF(cx, handle_rect.bottom() - 6.0),
+            QPointF(cx, handle_rect.top() + 7.0),
+            QPointF(cx, handle_rect.bottom() - 5.0),
         )

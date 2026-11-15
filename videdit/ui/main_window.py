@@ -324,6 +324,7 @@ class MainWindow(QMainWindow):
         self._export_btn = QPushButton("Export MP4")
         self._export_btn.setProperty("primary", True)
         self._cancel_btn = QPushButton("Cancel")
+        self._cancel_btn.setProperty("danger", True)
         self._cancel_btn.setVisible(False)
         btn_row.addWidget(self._export_btn, stretch=1)
         btn_row.addWidget(self._cancel_btn)
