@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 from typing import Literal, Optional
 
-from PySide6.QtCore import QSettings, Qt, QUrl
+from PySide6.QtCore import QEvent, QObject, QSettings, Qt, QUrl
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QKeySequence, QMouseEvent, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
@@ -174,6 +174,8 @@ class MainWindow(QMainWindow):
         drop_layout.addWidget(self._drop_open_btn, alignment=Qt.AlignmentFlag.AlignCenter)
 
         self._video_widget = QVideoWidget()
+        self._video_widget.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._install_video_click_filters(self._video_widget)
         self._player.setVideoOutput(self._video_widget)
 
         self._video_stack.addWidget(self._drop_stage)
@@ -652,6 +654,31 @@ class MainWindow(QMainWindow):
                 event.accept()
                 return
         super().mousePressEvent(event)
+
+    def _install_video_click_filters(self, widget: QWidget) -> None:
+        widget.installEventFilter(self)
+        for child in widget.findChildren(QWidget):
+            child.installEventFilter(self)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        is_video_surface = watched is self._video_widget or (
+            isinstance(watched, QWidget) and self._video_widget.isAncestorOf(watched)
+        )
+        if is_video_surface:
+            etype = event.type()
+            if etype == QEvent.Type.ChildAdded:
+                child = event.child()  # type: ignore[attr-defined]
+                if isinstance(child, QWidget):
+                    self._install_video_click_filters(child)
+            elif etype in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick):
+                if (
+                    isinstance(event, QMouseEvent)
+                    and event.button() == Qt.MouseButton.LeftButton
+                    and self._video_info is not None
+                ):
+                    self._toggle_play_pause()
+                    return True
+        return super().eventFilter(watched, event)
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if event.mimeData().hasUrls():

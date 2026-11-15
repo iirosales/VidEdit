@@ -10,7 +10,10 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QEvent, QPointF, Qt
+from PySide6.QtGui import QMouseEvent
+from PySide6.QtMultimedia import QMediaPlayer
+from PySide6.QtWidgets import QApplication, QWidget
 
 from videdit.ffmpeg_tools import find_ffmpeg_binaries
 from videdit.ui.chrome import CommandPalette
@@ -27,6 +30,14 @@ def qt_app() -> QApplication:
     if app is None:
         app = QApplication([])
     return app
+
+
+@pytest.fixture(scope="module")
+def main_window(qt_app: QApplication):
+    win = MainWindow(initial_theme="dark")
+    yield win
+    win.close()
+    qt_app.processEvents()
 
 
 def test_formatters() -> None:
@@ -74,7 +85,9 @@ def test_timeline_clamping(qt_app: QApplication) -> None:
     assert timeline.out_ms() == 10_000
 
 
-def test_main_window_loads_video_and_switches_presets(qt_app: QApplication, tmp_path: Path) -> None:
+def test_main_window_loads_video_and_switches_presets(
+    qt_app: QApplication, main_window: MainWindow, tmp_path: Path
+) -> None:
     ffmpeg_path, _ = find_ffmpeg_binaries()
     if not ffmpeg_path:
         pytest.skip("ffmpeg not available")
@@ -100,7 +113,7 @@ def test_main_window_loads_video_and_switches_presets(qt_app: QApplication, tmp_
         check=True,
     )
 
-    win = MainWindow(initial_theme="dark")
+    win = main_window
     if (Path(__file__).resolve().parent.parent / "favicon.ico").is_file():
         assert not win.windowIcon().isNull()
     assert win._step_back_btn.text() == "-0.1s"
@@ -143,5 +156,65 @@ def test_main_window_loads_video_and_switches_presets(qt_app: QApplication, tmp_
     win._set_output_format("gif")
     assert win._output_edit.text().endswith(".gif")
 
-    win.close()
+
+def test_click_video_surface_toggles_playback(
+    qt_app: QApplication, main_window: MainWindow, tmp_path: Path
+) -> None:
+    ffmpeg_path, _ = find_ffmpeg_binaries()
+    if not ffmpeg_path:
+        pytest.skip("ffmpeg not available")
+
+    clip = tmp_path / "click_toggle.mp4"
+    subprocess.run(
+        [
+            ffmpeg_path,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x180:rate=30:duration=2",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            str(clip),
+        ],
+        capture_output=True,
+        check=True,
+    )
+
+    win = main_window
+    win.load_video(clip)
     qt_app.processEvents()
+
+    assert win._player.playbackState() != QMediaPlayer.PlaybackState.PlayingState
+
+    # Click directly on the internal child QWidget (if created) or _video_widget itself
+    children = win._video_widget.findChildren(QWidget)
+    target = children[0] if children else win._video_widget
+
+    press_event = QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        QPointF(10, 10),
+        QPointF(10, 10),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    QApplication.sendEvent(target, press_event)
+    qt_app.processEvents()
+    assert win._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+
+    pause_event = QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        QPointF(10, 10),
+        QPointF(10, 10),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    QApplication.sendEvent(win._video_widget, pause_event)
+    qt_app.processEvents()
+    assert win._player.playbackState() == QMediaPlayer.PlaybackState.PausedState
