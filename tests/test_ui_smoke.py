@@ -293,3 +293,110 @@ def test_end_of_media_and_backward_scrub_keep_frame_visible(
     scrub_img = scrub_frame.toImage()
     assert not scrub_img.isNull()
     assert scrub_img.pixelColor(80, 60).lightness() > 0 or scrub_img.pixelColor(200, 90).lightness() > 0
+
+
+def test_screenshot_crop_drag_move_and_clear(
+    qt_app: QApplication, main_window: MainWindow, tmp_path: Path
+) -> None:
+    assert not make_monoline_icon("crop", "#F4F1F8").isNull()
+
+    ffmpeg_path, _ = find_ffmpeg_binaries()
+    if not ffmpeg_path:
+        pytest.skip("ffmpeg not available")
+
+    clip = tmp_path / "crop_ui.mp4"
+    subprocess.run(
+        [
+            ffmpeg_path,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=640x360:rate=30:duration=2",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            str(clip),
+        ],
+        capture_output=True,
+        check=True,
+    )
+
+    win = main_window
+    win.load_video(clip)
+    win._video_widget.resize(640, 360)
+    qt_app.processEvents()
+
+    assert win._active_crop is None
+    assert not win._clear_crop_btn.isVisibleTo(win)
+
+    # Enable Crop Mode and drag a screenshot-style marquee from (64, 36) to (384, 216)
+    win._crop_btn.click()
+    qt_app.processEvents()
+    assert win._video_widget.is_crop_mode()
+    assert win._crop_btn.text() == "Done Crop (C)"
+
+    start_pt = QPointF(64, 36)
+    end_pt = QPointF(384, 216)
+    QApplication.sendEvent(
+        win._video_widget,
+        QMouseEvent(
+            QEvent.Type.MouseButtonPress,
+            start_pt,
+            start_pt,
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        ),
+    )
+    QApplication.sendEvent(
+        win._video_widget,
+        QMouseEvent(
+            QEvent.Type.MouseMove,
+            end_pt,
+            end_pt,
+            Qt.MouseButton.NoButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        ),
+    )
+    QApplication.sendEvent(
+        win._video_widget,
+        QMouseEvent(
+            QEvent.Type.MouseButtonRelease,
+            end_pt,
+            end_pt,
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+        ),
+    )
+    qt_app.processEvents()
+
+    crop = win._active_crop
+    assert crop is not None
+    assert crop.x == pytest.approx(64, abs=2)
+    assert crop.y == pytest.approx(36, abs=2)
+    assert crop.width == pytest.approx(320, abs=2)
+    assert crop.height == pytest.approx(180, abs=2)
+    assert crop.width % 2 == 0 and crop.height % 2 == 0
+    assert win._clear_crop_btn.isVisibleTo(win)
+    assert win._crop_badge.text() == f"Crop: {crop.width}×{crop.height}"
+
+    # Render overlay paintEvent without errors
+    win._video_widget.repaint()
+
+    # Exit Crop Mode -> crop persists while clicking video toggles play/pause again
+    win._crop_btn.click()
+    qt_app.processEvents()
+    assert not win._video_widget.is_crop_mode()
+    assert win._active_crop == crop
+
+    # Clear crop resets crop state and hides clear controls
+    win._clear_crop_btn.click()
+    qt_app.processEvents()
+    assert win._active_crop is None
+    assert not win._clear_crop_btn.isVisibleTo(win)

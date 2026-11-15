@@ -7,10 +7,9 @@ import subprocess
 from pathlib import Path
 from typing import Literal, Optional
 
-from PySide6.QtCore import QEvent, QObject, QSettings, Qt, QUrl
+from PySide6.QtCore import QSettings, Qt, QUrl
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QKeySequence, QMouseEvent, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
-from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -34,11 +33,12 @@ from PySide6.QtWidgets import (
 )
 
 from videdit.exporter import ExportOptions, ExportWorker
-from videdit.ffmpeg_tools import VideoInfo, calculate_mp4_encoding_plan, probe_video
+from videdit.ffmpeg_tools import CropRect, VideoInfo, calculate_mp4_encoding_plan, probe_video
 from videdit.ui.chrome import CommandEntry, CommandPalette, DropStageWidget, TitleBar
 from videdit.ui.icons import ClockworkSpinner, make_monoline_icon
 from videdit.ui.theme import ThemeName, ThemeTokens, build_stylesheet, get_theme
 from videdit.ui.timeline import TrimTimelineWidget
+from videdit.ui.video_preview import VideoPreviewWidget
 from videdit.win_taskbar import apply_window_taskbar_metadata
 
 SUPPORTED_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".gif"}
@@ -95,6 +95,7 @@ class MainWindow(QMainWindow):
         self._theme: ThemeTokens = get_theme(theme_key)
 
         self._video_info: Optional[VideoInfo] = None
+        self._active_crop: Optional[CropRect] = None
         self._duration_ms: int = 0
         self._output_format: Literal["mp4", "gif"] = "mp4"
         self._output_customized: bool = False
@@ -173,10 +174,8 @@ class MainWindow(QMainWindow):
         drop_layout.addSpacing(10)
         drop_layout.addWidget(self._drop_open_btn, alignment=Qt.AlignmentFlag.AlignCenter)
 
-        self._video_widget = QVideoWidget()
-        self._video_widget.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._install_video_click_filters(self._video_widget)
-        self._player.setVideoOutput(self._video_widget)
+        self._video_widget = VideoPreviewWidget()
+        self._player.setVideoOutput(self._video_widget.videoSink())
 
         self._video_stack.addWidget(self._drop_stage)
         self._video_stack.addWidget(self._video_widget)
@@ -226,6 +225,15 @@ class MainWindow(QMainWindow):
         self._set_in_btn = QPushButton("Set In (I)")
         self._set_out_btn = QPushButton("Set Out (O)")
         self._reset_trim_btn = QPushButton("Reset")
+        self._crop_btn = QPushButton("Crop (C)")
+        self._crop_btn.setCheckable(True)
+        self._crop_btn.setProperty("pill", True)
+        self._crop_btn.setToolTip("Draw a screenshot-style crop box directly on the video (C)")
+        self._clear_crop_btn = QPushButton("Clear Crop")
+        self._clear_crop_btn.setVisible(False)
+        self._crop_badge = QLabel("")
+        self._crop_badge.setObjectName("BadgeLabel")
+        self._crop_badge.setVisible(False)
         self._in_badge = QLabel("In: 00:00.00")
         self._in_badge.setObjectName("BadgeLabel")
         self._out_badge = QLabel("Out: 00:00.00")
@@ -236,7 +244,10 @@ class MainWindow(QMainWindow):
         trim_actions.addWidget(self._set_in_btn)
         trim_actions.addWidget(self._set_out_btn)
         trim_actions.addWidget(self._reset_trim_btn)
+        trim_actions.addWidget(self._crop_btn)
+        trim_actions.addWidget(self._clear_crop_btn)
         trim_actions.addStretch(1)
+        trim_actions.addWidget(self._crop_badge)
         trim_actions.addWidget(self._in_badge)
         trim_actions.addWidget(self._out_badge)
         trim_actions.addWidget(self._dur_badge)
@@ -504,6 +515,12 @@ class MainWindow(QMainWindow):
         self._set_in_btn.clicked.connect(self._set_in_at_playhead)
         self._set_out_btn.clicked.connect(self._set_out_at_playhead)
         self._reset_trim_btn.clicked.connect(self._reset_trim)
+        self._crop_btn.toggled.connect(self._on_crop_mode_toggled)
+        self._clear_crop_btn.clicked.connect(self._clear_crop)
+
+        self._video_widget.clicked.connect(self._toggle_play_pause)
+        self._video_widget.crop_changed.connect(self._on_crop_changed)
+        self._video_widget.crop_mode_exit_requested.connect(self._exit_crop_mode)
 
         self._timeline.seek_requested.connect(self._seek_to_ms)
         self._timeline.trim_changed.connect(self._on_trim_changed)
@@ -535,6 +552,8 @@ class MainWindow(QMainWindow):
         self._bind_shortcut("Space", self._toggle_play_pause)
         self._bind_shortcut("I", self._set_in_at_playhead)
         self._bind_shortcut("O", self._set_out_at_playhead)
+        self._bind_shortcut("C", self._toggle_crop_mode)
+        self._bind_shortcut("Escape", self._exit_crop_mode)
         self._bind_shortcut("Left", lambda: self._step_by_ms(-100))
         self._bind_shortcut("Right", lambda: self._step_by_ms(100))
         self._bind_shortcut("Shift+Left", lambda: self._step_by_ms(-1000))
@@ -567,6 +586,7 @@ class MainWindow(QMainWindow):
 
         self._timeline.apply_theme(self._theme)
         self._drop_stage.apply_theme(self._theme)
+        self._video_widget.apply_theme(self._theme)
         self._dial_spinner.set_colors(self._theme.color_secondary, self._theme.accent_cobalt)
         self._theme_toggle_btn.setText(f"Theme: {self._theme.display_name}")
         self._refresh_icons()
@@ -581,6 +601,8 @@ class MainWindow(QMainWindow):
         self._open_btn.setIcon(make_monoline_icon("open", c))
         self._step_back_btn.setIcon(make_monoline_icon("step_back", c))
         self._step_fwd_btn.setIcon(make_monoline_icon("step_fwd", c))
+        crop_icon_color = self._theme.color_primary_text if self._crop_btn.isChecked() else c
+        self._crop_btn.setIcon(make_monoline_icon("crop", crop_icon_color))
         is_playing = self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
         self._play_btn.setIcon(make_monoline_icon("pause" if is_playing else "play", c))
         is_muted = self._audio_output.isMuted()
@@ -596,6 +618,8 @@ class MainWindow(QMainWindow):
             CommandEntry("Set In Point at Playhead", "I", self._set_in_at_playhead),
             CommandEntry("Set Out Point at Playhead", "O", self._set_out_at_playhead),
             CommandEntry("Reset Trim Range", "", self._reset_trim),
+            CommandEntry("Toggle Video Crop Mode", "C", self._toggle_crop_mode),
+            CommandEntry("Clear Video Crop", "", self._clear_crop),
             CommandEntry("Format: MP4 Video", "", lambda: self._select_format_pill("mp4")),
             CommandEntry("Format: GIF Animation", "", lambda: self._select_format_pill("gif")),
             CommandEntry("MP4 Preset: Original Quality", "", lambda: self._select_mp4_preset("original")),
@@ -656,31 +680,6 @@ class MainWindow(QMainWindow):
                 return
         super().mousePressEvent(event)
 
-    def _install_video_click_filters(self, widget: QWidget) -> None:
-        widget.installEventFilter(self)
-        for child in widget.findChildren(QWidget):
-            child.installEventFilter(self)
-
-    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
-        is_video_surface = watched is self._video_widget or (
-            isinstance(watched, QWidget) and self._video_widget.isAncestorOf(watched)
-        )
-        if is_video_surface:
-            etype = event.type()
-            if etype == QEvent.Type.ChildAdded:
-                child = event.child()  # type: ignore[attr-defined]
-                if isinstance(child, QWidget):
-                    self._install_video_click_filters(child)
-            elif etype in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick):
-                if (
-                    isinstance(event, QMouseEvent)
-                    and event.button() == Qt.MouseButton.LeftButton
-                    and self._video_info is not None
-                ):
-                    self._toggle_play_pause()
-                    return True
-        return super().eventFilter(watched, event)
-
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
@@ -722,10 +721,15 @@ class MainWindow(QMainWindow):
             return
 
         self._video_info = info
+        self._active_crop = None
         self._duration_ms = max(200, int(round(info.duration_sec * 1000)))
         self._output_customized = False
         self._result_widget.setVisible(False)
         self._status_label.setText("")
+        self._crop_btn.setChecked(False)
+        self._video_widget.set_crop_mode(False)
+        self._video_widget.set_source_size(info.width, info.height)
+        self._on_crop_changed(None)
 
         self._file_label.setText(path.name)
         self._file_label.setToolTip(str(path))
@@ -753,6 +757,8 @@ class MainWindow(QMainWindow):
             self._set_in_btn,
             self._set_out_btn,
             self._reset_trim_btn,
+            self._crop_btn,
+            self._clear_crop_btn,
             self._export_btn,
             self._browse_btn,
             self._output_edit,
@@ -809,6 +815,35 @@ class MainWindow(QMainWindow):
         if self._video_info is None:
             return
         self._timeline.set_trim_points(0, self._duration_ms, emit=True)
+
+    def _toggle_crop_mode(self) -> None:
+        if self._video_info is None:
+            return
+        self._crop_btn.setChecked(not self._crop_btn.isChecked())
+
+    def _exit_crop_mode(self) -> None:
+        if self._crop_btn.isChecked():
+            self._crop_btn.setChecked(False)
+
+    def _on_crop_mode_toggled(self, enabled: bool) -> None:
+        if enabled and self._video_info is None:
+            self._crop_btn.setChecked(False)
+            return
+        self._video_widget.set_crop_mode(enabled)
+        self._crop_btn.setText("Done Crop (C)" if enabled else "Crop (C)")
+        self._refresh_icons()
+
+    def _clear_crop(self) -> None:
+        self._video_widget.set_crop_rect(None, emit=True)
+
+    def _on_crop_changed(self, crop: Optional[CropRect]) -> None:
+        self._active_crop = crop
+        has_crop = crop is not None
+        self._clear_crop_btn.setVisible(has_crop)
+        self._crop_badge.setVisible(has_crop)
+        if crop is not None:
+            self._crop_badge.setText(f"Crop: {crop.width}×{crop.height}")
+        self._refresh_estimate_and_output()
 
     def _on_trim_changed(self, in_ms: int, out_ms: int) -> None:
         self._in_badge.setText(f"In: {format_timestamp_ms(in_ms)}")
@@ -939,12 +974,13 @@ class MainWindow(QMainWindow):
             return
 
         mode, fixed_height = self._mp4_res_combo.currentData()
+        effective_height = self._active_crop.height if self._active_crop is not None else self._video_info.height
         plan = calculate_mp4_encoding_plan(
             duration_sec=clip_sec,
             target_mb=target_mb,
             has_audio=self._video_info.has_audio,
             mute_audio=self._mute_export_check.isChecked(),
-            source_height=self._video_info.height,
+            source_height=effective_height,
             max_height=fixed_height,
             auto_scale=(mode == "auto"),
         )
@@ -991,6 +1027,7 @@ class MainWindow(QMainWindow):
             end_sec=end_sec,
             output_format=self._output_format,
             video_info=self._video_info,
+            crop=self._active_crop,
             target_size_mb=self._selected_target_mb(),
             max_height=fixed_height,
             auto_scale_for_target=(mode == "auto"),

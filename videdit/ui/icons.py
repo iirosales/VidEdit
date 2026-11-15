@@ -103,6 +103,10 @@ def make_monoline_icon(name: str, color: str, size: int = 16) -> QIcon:
         p.drawArc(QRectF(m + 0.5, m + 0.5, s - 2 * m - 1.0, s - 2 * m - 1.0), 40 * 16, 230 * 16)
         p.drawLine(QPointF(s - m - 2.0, m + 1.5), QPointF(s - m - 2.0, m + 4.5))
         p.drawLine(QPointF(s - m - 3.5, m + 3.0), QPointF(s - m - 0.5, m + 3.0))
+    elif name == "crop":
+        # Classic overlapping right-angle crop frame
+        p.drawPolyline(QPolygonF([QPointF(m + 2.0, m), QPointF(m + 2.0, s - m - 2.0), QPointF(s - m, s - m - 2.0)]))
+        p.drawPolyline(QPolygonF([QPointF(m, m + 2.0), QPointF(s - m - 2.0, m + 2.0), QPointF(s - m - 2.0, s - m)]))
 
     p.end()
     return QIcon(pixmap)
