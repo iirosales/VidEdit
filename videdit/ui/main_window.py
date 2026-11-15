@@ -39,6 +39,7 @@ from videdit.ui.chrome import CommandEntry, CommandPalette, DropStageWidget, Tit
 from videdit.ui.icons import ClockworkSpinner, make_monoline_icon
 from videdit.ui.theme import ThemeName, ThemeTokens, build_stylesheet, get_theme
 from videdit.ui.timeline import TrimTimelineWidget
+from videdit.win_taskbar import apply_window_taskbar_metadata
 
 SUPPORTED_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".gif"}
 _RESIZE_MARGIN = 6
@@ -99,6 +100,7 @@ class MainWindow(QMainWindow):
         self._output_customized: bool = False
         self._worker: Optional[ExportWorker] = None
         self._last_exported_path: Optional[Path] = None
+        self._taskbar_props_applied: bool = False
 
         self._player = QMediaPlayer(self)
         self._audio_output = QAudioOutput(self)
@@ -1004,6 +1006,18 @@ class MainWindow(QMainWindow):
             folder = self._last_exported_path.parent
             if os.name == "nt":
                 os.startfile(str(folder))  # type: ignore[attr-defined]
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if not self._taskbar_props_applied:
+            app = QApplication.instance()
+            if app is not None and app.platformName() == "windows":
+                project_root = Path(__file__).resolve().parent.parent.parent
+                self._taskbar_props_applied = apply_window_taskbar_metadata(
+                    hwnd=int(self.winId()),
+                    project_root=project_root,
+                    icon_path=self._icon_path,
+                )
 
     def closeEvent(self, event) -> None:
         if self._worker is not None and self._worker.isRunning():

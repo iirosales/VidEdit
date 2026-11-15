@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ctypes
 import sys
 from pathlib import Path
 from typing import Optional
@@ -12,6 +11,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from videdit.ffmpeg_tools import find_ffmpeg_binaries
 from videdit.ui.main_window import MainWindow
+from videdit.win_taskbar import set_process_app_user_model_id
 
 
 def resolve_app_icon_path() -> Optional[Path]:
@@ -20,19 +20,9 @@ def resolve_app_icon_path() -> Optional[Path]:
     return candidate if candidate.is_file() else None
 
 
-def _set_windows_app_user_model_id() -> None:
-    """Assign an explicit Windows AppUserModelID so the taskbar uses VidEdit's icon instead of Python's."""
-    if sys.platform != "win32":
-        return
-    try:
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("iirosales.VidEdit.App.1")
-    except (AttributeError, OSError):
-        pass
-
-
 def main() -> int:
     """Launch the VidEdit desktop GUI."""
-    _set_windows_app_user_model_id()
+    set_process_app_user_model_id()
 
     app = QApplication(sys.argv)
     app.setApplicationName("VidEdit")

@@ -18,6 +18,7 @@ from videdit.ui.icons import ClockworkSpinner, make_monoline_icon
 from videdit.ui.main_window import MainWindow, format_file_size, format_timestamp_ms
 from videdit.ui.theme import DARK_THEME, LIGHT_THEME, build_stylesheet
 from videdit.ui.timeline import TrimTimelineWidget
+from videdit.win_taskbar import build_relaunch_command
 
 
 @pytest.fixture(scope="module")
@@ -53,6 +54,12 @@ def test_monoline_icons_and_spinner(qt_app: QApplication) -> None:
     spinner = ClockworkSpinner()
     spinner.set_active(True)
     spinner.set_active(False)
+
+
+def test_relaunch_command_points_to_run_py() -> None:
+    root = Path(__file__).resolve().parent.parent
+    cmd = build_relaunch_command(root)
+    assert "run.py" in cmd
 
 
 def test_timeline_clamping(qt_app: QApplication) -> None:
