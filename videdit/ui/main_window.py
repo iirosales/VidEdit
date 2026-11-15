@@ -511,6 +511,7 @@ class MainWindow(QMainWindow):
         self._player.positionChanged.connect(self._on_player_position_changed)
         self._player.durationChanged.connect(self._on_player_duration_changed)
         self._player.playbackStateChanged.connect(self._on_playback_state_changed)
+        self._player.mediaStatusChanged.connect(self._on_media_status_changed)
 
         self._fmt_mp4_btn.clicked.connect(lambda: self._set_output_format("mp4"))
         self._fmt_gif_btn.clicked.connect(lambda: self._set_output_format("gif"))
@@ -765,8 +766,11 @@ class MainWindow(QMainWindow):
             self._player.pause()
         else:
             pos = self._player.position()
-            if pos < self._timeline.in_ms() or pos >= self._timeline.out_ms():
-                self._player.setPosition(self._timeline.in_ms())
+            in_ms = self._timeline.in_ms()
+            out_ms = self._timeline.out_ms()
+            near_end = out_ms > in_ms and pos >= max(in_ms, out_ms - 60)
+            if pos < in_ms or near_end:
+                self._player.setPosition(in_ms)
             self._player.play()
 
     def _step_by_ms(self, delta_ms: int) -> None:
@@ -778,7 +782,10 @@ class MainWindow(QMainWindow):
     def _seek_to_ms(self, ms: int) -> None:
         if self._video_info is None:
             return
-        self._player.setPosition(ms)
+        if self._player.playbackState() == QMediaPlayer.PlaybackState.StoppedState:
+            self._player.pause()
+        player_ms = min(ms, max(0, self._duration_ms - 50)) if self._duration_ms > 50 else ms
+        self._player.setPosition(player_ms)
         self._timeline.set_position(ms)
         self._update_time_label(ms)
 
@@ -837,6 +844,26 @@ class MainWindow(QMainWindow):
         self._play_btn.setIcon(
             make_monoline_icon("pause" if is_playing else "play", self._theme.text_primary)
         )
+
+    def _on_media_status_changed(self, status: QMediaPlayer.MediaStatus) -> None:
+        if self._video_info is None:
+            return
+        if status == QMediaPlayer.MediaStatus.LoadedMedia:
+            if self._player.playbackState() == QMediaPlayer.PlaybackState.StoppedState:
+                self._player.pause()
+                self._player.setPosition(self._timeline.in_ms())
+        elif status == QMediaPlayer.MediaStatus.EndOfMedia:
+            if self._loop_check.isChecked():
+                self._player.setPosition(self._timeline.in_ms())
+                self._player.play()
+            else:
+                end_pos = max(0, self._duration_ms - 50)
+                if self._timeline.out_ms() > 0:
+                    end_pos = min(self._timeline.out_ms(), end_pos)
+                self._player.pause()
+                self._player.setPosition(end_pos)
+                self._timeline.set_position(end_pos)
+                self._update_time_label(end_pos)
 
     def _update_time_label(self, pos_ms: int) -> None:
         self._time_label.setText(

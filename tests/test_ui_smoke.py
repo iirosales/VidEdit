@@ -10,7 +10,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QPointF, Qt
+from PySide6.QtCore import QEvent, QEventLoop, QPointF, QTimer, Qt
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import QApplication, QWidget
@@ -218,3 +218,78 @@ def test_click_video_surface_toggles_playback(
     QApplication.sendEvent(win._video_widget, pause_event)
     qt_app.processEvents()
     assert win._player.playbackState() == QMediaPlayer.PlaybackState.PausedState
+
+
+def test_end_of_media_and_backward_scrub_keep_frame_visible(
+    qt_app: QApplication, main_window: MainWindow, tmp_path: Path
+) -> None:
+    ffmpeg_path, _ = find_ffmpeg_binaries()
+    if not ffmpeg_path:
+        pytest.skip("ffmpeg not available")
+
+    clip = tmp_path / "eof_preview.mp4"
+    subprocess.run(
+        [
+            ffmpeg_path,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x180:rate=30:duration=1",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            str(clip),
+        ],
+        capture_output=True,
+        check=True,
+    )
+
+    win = main_window
+    win._loop_check.setChecked(False)
+    win.load_video(clip)
+
+    def _wait_ms(ms: int) -> None:
+        loop = QEventLoop()
+        QTimer.singleShot(ms, loop.quit)
+        loop.exec()
+
+    # Wait until LoadedMedia settles and start playing through EndOfMedia.
+    _wait_ms(200)
+    win._player.setPosition(700)
+    win._player.play()
+
+    eof_reached = False
+    for _ in range(30):
+        _wait_ms(100)
+        if win._player.mediaStatus() == QMediaPlayer.MediaStatus.EndOfMedia or (
+            win._player.playbackState() == QMediaPlayer.PlaybackState.PausedState
+            and win._player.position() >= 850
+        ):
+            eof_reached = True
+            break
+
+    assert eof_reached
+    _wait_ms(250)
+
+    assert win._player.playbackState() == QMediaPlayer.PlaybackState.PausedState
+    sink = win._video_widget.videoSink()
+    end_frame = sink.videoFrame()
+    assert end_frame.isValid()
+    end_img = end_frame.toImage()
+    assert not end_img.isNull()
+    assert end_img.pixelColor(80, 60).lightness() > 0 or end_img.pixelColor(200, 90).lightness() > 0
+
+    # Scrub backward while paused after EndOfMedia and verify preview frame stays valid.
+    win._timeline.seek_requested.emit(250)
+    _wait_ms(250)
+
+    assert win._player.playbackState() == QMediaPlayer.PlaybackState.PausedState
+    scrub_frame = sink.videoFrame()
+    assert scrub_frame.isValid()
+    scrub_img = scrub_frame.toImage()
+    assert not scrub_img.isNull()
+    assert scrub_img.pixelColor(80, 60).lightness() > 0 or scrub_img.pixelColor(200, 90).lightness() > 0
