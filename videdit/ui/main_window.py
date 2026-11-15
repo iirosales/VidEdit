@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 from typing import Literal, Optional
 
-from PySide6.QtCore import QSettings, Qt, QUrl
+from PySide6.QtCore import QSettings, QStandardPaths, Qt, QUrl
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QKeySequence, QMouseEvent, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
@@ -43,6 +43,21 @@ from videdit.win_taskbar import apply_window_taskbar_metadata
 
 SUPPORTED_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".gif"}
 _RESIZE_MARGIN = 6
+_DEFAULT_OPEN_DIR_KEY = "paths/default_open_dir"
+
+
+def resolve_fallback_open_dir() -> Path:
+    """Return the OS Videos folder (or home) so Open Video never defaults to .venv/Scripts."""
+    movies = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.MoviesLocation)
+    if movies:
+        movies_path = Path(movies)
+        if movies_path.is_dir():
+            return movies_path
+    videos_home = Path.home() / "Videos"
+    if videos_home.is_dir():
+        return videos_home
+    home = Path.home()
+    return home if home.is_dir() else Path.cwd()
 
 
 def format_timestamp_ms(ms: int) -> str:
@@ -74,7 +89,11 @@ def _resolve_icon_path() -> Optional[Path]:
 class MainWindow(QMainWindow):
     """Primary VidEdit desktop interface with dual Alabaster/Midnight themes."""
 
-    def __init__(self, initial_theme: Optional[ThemeName] = None) -> None:
+    def __init__(
+        self,
+        initial_theme: Optional[ThemeName] = None,
+        settings: Optional[QSettings] = None,
+    ) -> None:
         super().__init__()
         self.setWindowTitle("VidEdit — Cut, GIF & Discord Compressor")
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
@@ -87,7 +106,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(920, 640)
         self.setAcceptDrops(True)
 
-        self._settings = QSettings("iirosales", "VidEdit")
+        self._settings = settings if settings is not None else QSettings("iirosales", "VidEdit")
         saved_theme = str(self._settings.value("ui/theme", "dark"))
         theme_key: ThemeName = initial_theme if initial_theme in ("light", "dark") else (
             "light" if saved_theme == "light" else "dark"
@@ -112,6 +131,7 @@ class MainWindow(QMainWindow):
         self._connect_signals()
         self._setup_shortcuts()
         self._update_controls_enabled(False)
+        self._refresh_default_open_dir_ui()
         self.apply_theme(self._theme.name)
 
     def _build_ui(self) -> None:
@@ -142,11 +162,13 @@ class MainWindow(QMainWindow):
         header = QHBoxLayout()
         header.setSpacing(10)
         self._open_btn = QPushButton("Open Video...")
+        self._default_folder_btn = QPushButton("Default Folder...")
         self._file_label = QLabel("Drop a video file here or click Open Video...")
         self._file_label.setObjectName("MutedLabel")
         self._meta_badge = QLabel("NO SOURCE")
         self._meta_badge.setObjectName("BadgeLabel")
         header.addWidget(self._open_btn)
+        header.addWidget(self._default_folder_btn)
         header.addWidget(self._file_label, stretch=1)
         header.addWidget(self._meta_badge)
         left_col.addLayout(header)
@@ -504,6 +526,7 @@ class MainWindow(QMainWindow):
         self._title_bar.close_requested.connect(self.close)
 
         self._open_btn.clicked.connect(self._choose_input_file)
+        self._default_folder_btn.clicked.connect(self._choose_default_open_folder)
         self._drop_open_btn.clicked.connect(self._choose_input_file)
 
         self._play_btn.clicked.connect(self._toggle_play_pause)
@@ -614,6 +637,8 @@ class MainWindow(QMainWindow):
         """Return commands exposed in the Ctrl+K Command Palette."""
         return [
             CommandEntry("Open Video File...", "Click", self._choose_input_file),
+            CommandEntry("Set Default Open Folder...", "", self._choose_default_open_folder),
+            CommandEntry("Reset Default Open Folder", "", self._reset_default_open_folder),
             CommandEntry("Play / Pause Preview", "Space", self._toggle_play_pause),
             CommandEntry("Set In Point at Playhead", "I", self._set_in_at_playhead),
             CommandEntry("Set Out Point at Playhead", "O", self._set_out_at_playhead),
@@ -697,11 +722,55 @@ class MainWindow(QMainWindow):
                     event.acceptProposedAction()
                     return
 
+    def default_open_dir(self) -> Path:
+        """Return the configured default folder for Open Video, or the OS fallback."""
+        raw = str(self._settings.value(_DEFAULT_OPEN_DIR_KEY, "") or "").strip()
+        if raw:
+            candidate = Path(raw)
+            if candidate.is_dir():
+                return candidate
+        return resolve_fallback_open_dir()
+
+    def set_default_open_dir(self, folder: Optional[Path]) -> Path:
+        """Persist a user-chosen default open folder (or clear to restore fallback)."""
+        if folder is None:
+            self._settings.remove(_DEFAULT_OPEN_DIR_KEY)
+        else:
+            resolved = Path(folder)
+            if not resolved.is_dir():
+                raise ValueError(f"Default folder does not exist: {resolved}")
+            self._settings.setValue(_DEFAULT_OPEN_DIR_KEY, str(resolved))
+        self._settings.sync()
+        active = self.default_open_dir()
+        self._refresh_default_open_dir_ui(active)
+        return active
+
+    def _refresh_default_open_dir_ui(self, active: Optional[Path] = None) -> None:
+        folder = active if active is not None else self.default_open_dir()
+        self._default_folder_btn.setToolTip(
+            f"Default Open Video folder: {folder}\nClick to change."
+        )
+        self._open_btn.setToolTip(f"Open a video from {folder}")
+
+    def _choose_default_open_folder(self) -> None:
+        folder_str = QFileDialog.getExistingDirectory(
+            self,
+            "Select Default Video Folder",
+            str(self.default_open_dir()),
+        )
+        if folder_str:
+            chosen = self.set_default_open_dir(Path(folder_str))
+            self._telemetry_label.setText(f"DEFAULT FOLDER · {chosen}")
+
+    def _reset_default_open_folder(self) -> None:
+        active = self.set_default_open_dir(None)
+        self._telemetry_label.setText(f"DEFAULT FOLDER · {active}")
+
     def _choose_input_file(self) -> None:
         path_str, _ = QFileDialog.getOpenFileName(
             self,
             "Open Video",
-            "",
+            str(self.default_open_dir()),
             "Video Files (*.mp4 *.mov *.mkv *.webm *.avi *.m4v *.gif);;All Files (*)",
         )
         if path_str:
@@ -953,7 +1022,7 @@ class MainWindow(QMainWindow):
     def _choose_output_file(self) -> None:
         ext = "mp4" if self._output_format == "mp4" else "gif"
         filt = "MP4 Video (*.mp4)" if ext == "mp4" else "GIF Animation (*.gif)"
-        start_path = self._output_edit.text().strip() or ""
+        start_path = self._output_edit.text().strip() or str(self.default_open_dir())
         path_str, _ = QFileDialog.getSaveFileName(self, "Save Exported Clip", start_path, filt)
         if path_str:
             chosen = Path(path_str)
