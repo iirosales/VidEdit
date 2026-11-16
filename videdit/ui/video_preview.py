@@ -5,12 +5,28 @@ from __future__ import annotations
 from typing import Literal, Optional
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QMouseEvent, QPainter, QPen
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QFontDatabase,
+    QFontMetricsF,
+    QMouseEvent,
+    QPainter,
+    QPainterPath,
+    QPen,
+)
 from PySide6.QtMultimedia import QVideoFrame, QVideoSink
 from PySide6.QtWidgets import QWidget
 
-from videdit.ffmpeg_tools import CropRect, normalize_crop_rect
-from videdit.ui.theme import DARK_THEME, ThemeTokens
+from videdit.ffmpeg_tools import (
+    CropRect,
+    GifCaption,
+    compute_meme_caption_metrics,
+    find_impact_font_path,
+    normalize_crop_rect,
+    wrap_meme_caption,
+)
+from videdit.ui.theme import DARK_THEME, ThemeTokens, resolve_font_family
 
 DragHandle = Literal["new", "move", "tl", "t", "tr", "r", "br", "b", "bl", "l"]
 
@@ -44,6 +60,8 @@ class VideoPreviewWidget(QWidget):
         self._drag_origin = QPointF()
         self._drag_start_rect = QRectF()
         self._live_widget_rect: Optional[QRectF] = None
+        self._caption_preview: Optional[GifCaption] = None
+        self._impact_family: Optional[str] = None
 
     def videoSink(self) -> QVideoSink:
         """Expose the underlying QVideoSink so QMediaPlayer can target this widget."""
@@ -87,6 +105,30 @@ class VideoPreviewWidget(QWidget):
         self._live_widget_rect = None
         self._update_cursor(self.mapFromGlobal(self.cursor().pos()))
         self.update()
+
+    def set_caption_preview(self, caption: Optional[GifCaption]) -> None:
+        """Update the live meme caption preview overlay (or clear when None/inactive)."""
+        next_caption = caption if (caption is not None and caption.is_active()) else None
+        if next_caption != self._caption_preview:
+            self._caption_preview = next_caption
+            self.update()
+
+    def caption_preview(self) -> Optional[GifCaption]:
+        return self._caption_preview
+
+    def _resolve_impact_family(self) -> str:
+        if self._impact_family is not None:
+            return self._impact_family
+        impact_path = find_impact_font_path()
+        if impact_path is not None:
+            fid = QFontDatabase.addApplicationFont(str(impact_path))
+            if fid >= 0:
+                families = QFontDatabase.applicationFontFamilies(fid)
+                if families:
+                    self._impact_family = families[0]
+                    return self._impact_family
+        self._impact_family = resolve_font_family(("Impact", "Arial Black", "Arial"), "Arial")
+        return self._impact_family
 
     def _on_video_frame_changed(self, frame: QVideoFrame) -> None:
         if frame.isValid():
@@ -312,12 +354,81 @@ class VideoPreviewWidget(QWidget):
         if active_wrect is None and self._crop_rect is not None:
             active_wrect = self._crop_to_widget_rect(self._crop_rect)
 
+        clipped_crop = active_wrect.intersected(target) if active_wrect is not None else None
+        if self._caption_preview is not None:
+            caption_region = clipped_crop if clipped_crop is not None else target
+            self._paint_caption_overlay(painter, caption_region, self._caption_preview)
+
         if self._crop_mode and active_wrect is None:
             self._paint_crop_prompt(painter, target)
             return
 
-        if active_wrect is not None:
-            self._paint_crop_overlay(painter, target, active_wrect.intersected(target))
+        if clipped_crop is not None:
+            self._paint_crop_overlay(painter, target, clipped_crop)
+
+    def _paint_caption_overlay(
+        self,
+        painter: QPainter,
+        region: QRectF,
+        caption: GifCaption,
+    ) -> None:
+        if region.width() < 24.0 or region.height() < 24.0 or not caption.is_active():
+            return
+
+        font_px, border_w = compute_meme_caption_metrics(
+            region.width(),
+            region.height(),
+            size_scale=caption.size_scale,
+        )
+        font = QFont(self._resolve_impact_family())
+        font.setPixelSize(max(10, int(round(font_px))))
+        fm = QFontMetricsF(font)
+        line_step = font_px * 1.12
+        stroke_pen = QPen(
+            QColor("#000000"),
+            max(2.0, float(border_w) * 1.6),
+            Qt.PenStyle.SolidLine,
+            Qt.PenCapStyle.RoundCap,
+            Qt.PenJoinStyle.RoundJoin,
+        )
+
+        painter.save()
+        painter.setClipRect(region)
+
+        def draw_lines(lines: list[str], is_top: bool) -> None:
+            total = len(lines)
+            for idx, line in enumerate(lines):
+                line_w = fm.horizontalAdvance(line)
+                x = region.center().x() - line_w / 2.0
+                if is_top:
+                    baseline_y = region.top() + region.height() * 0.04 + fm.ascent() + idx * line_step
+                else:
+                    offset = total - 1 - idx
+                    baseline_y = region.bottom() - region.height() * 0.04 - fm.descent() - offset * line_step
+                path = QPainterPath()
+                path.addText(x, baseline_y, font, line)
+                painter.strokePath(path, stroke_pen)
+                painter.fillPath(path, QColor("#FFFFFF"))
+
+        top_lines = wrap_meme_caption(
+            caption.top_text,
+            region.width(),
+            font_px,
+            uppercase=caption.uppercase,
+        )
+        if top_lines:
+            draw_lines(top_lines, is_top=True)
+
+        bottom_lines = wrap_meme_caption(
+            caption.bottom_text,
+            region.width(),
+            font_px,
+            uppercase=caption.uppercase,
+        )
+        if bottom_lines:
+            draw_lines(bottom_lines, is_top=False)
+
+        painter.restore()
 
     def _paint_crop_prompt(self, painter: QPainter, target: QRectF) -> None:
         painter.fillRect(target, QColor(10, 9, 14, 72))

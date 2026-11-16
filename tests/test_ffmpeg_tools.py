@@ -10,13 +10,16 @@ import pytest
 
 from videdit.ffmpeg_tools import (
     CropRect,
+    GifCaption,
     build_gif_cmd,
     build_mp4_quality_cmd,
     build_mp4_two_pass_cmds,
     calculate_mp4_encoding_plan,
+    escape_ffmpeg_drawtext,
     normalize_crop_rect,
     parse_ffmpeg_progress_line,
     parse_ffprobe_json,
+    wrap_meme_caption,
 )
 
 
@@ -190,3 +193,60 @@ def test_normalize_crop_rect_and_ffmpeg_filters() -> None:
     )
     fc = gif_cmd[gif_cmd.index("-filter_complex") + 1]
     assert fc.startswith("[0:v]crop=302:204:100:50,fps=15,")
+
+
+def test_meme_caption_wrapping_and_escaping() -> None:
+    assert not GifCaption().is_active()
+    assert not GifCaption(top_text="   ", bottom_text="\t").is_active()
+    assert GifCaption(top_text="hello").is_active()
+
+    lines = wrap_meme_caption(
+        "when the code compiles on the very first try without errors",
+        max_width_px=360,
+        font_px=30.0,
+        uppercase=True,
+    )
+    assert len(lines) >= 2
+    assert all(line == line.upper() for line in lines)
+
+    mixed = wrap_meme_caption("Keep Case Here", max_width_px=480, font_px=24.0, uppercase=False)
+    assert mixed == ["Keep Case Here"]
+
+    long_token = wrap_meme_caption("A" * 60, max_width_px=240, font_px=24.0, uppercase=True)
+    assert len(long_token) >= 2
+    assert "".join(long_token) == "A" * 60
+
+    escaped = escape_ffmpeg_drawtext("IT'S: 100% [OK]; A=B\\C")
+    assert "expansion" not in escaped
+    assert "\\:" in escaped
+    assert "\\=" in escaped
+
+
+def test_build_gif_cmd_with_meme_captions() -> None:
+    caption = GifCaption(
+        top_text="Top line: 100%",
+        bottom_text="Bottom's [done]",
+        size_scale=1.28,
+        uppercase=True,
+    )
+    cmd = build_gif_cmd(
+        ffmpeg_path="ffmpeg",
+        input_path=Path("in.mp4"),
+        output_path=Path("out.gif"),
+        start_sec=0.0,
+        duration_sec=2.0,
+        fps=15,
+        max_width=480,
+        caption=caption,
+        source_width=1280,
+        source_height=720,
+    )
+    fc = cmd[cmd.index("-filter_complex") + 1]
+    assert fc.count("drawtext=") == 2
+    assert "impact" in fc.lower()
+    assert "fontcolor=white" in fc
+    assert "bordercolor=black" in fc
+    assert "expansion=none" in fc
+    assert "x='(w-text_w)/2'" in fc
+    # Captions must run after scale and before palette split.
+    assert fc.index("scale='min(iw,480)'") < fc.index("drawtext=") < fc.index("split[s0][s1]")

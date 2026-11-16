@@ -78,6 +78,20 @@ class CropRect:
         return f"crop={self.width}:{self.height}:{self.x}:{self.y}"
 
 
+@dataclass(frozen=True)
+class GifCaption:
+    """Meme-style top/bottom caption settings for GIF export."""
+
+    top_text: str = ""
+    bottom_text: str = ""
+    size_scale: float = 1.0
+    uppercase: bool = True
+
+    def is_active(self) -> bool:
+        """Return True when either top or bottom caption contains text."""
+        return bool(self.top_text.strip() or self.bottom_text.strip())
+
+
 def normalize_crop_rect(
     crop: Optional[CropRect],
     source_width: int,
@@ -391,6 +405,189 @@ def build_mp4_two_pass_cmds(
     return pass1_cmd, pass2_cmd
 
 
+def find_impact_font_path() -> Optional[Path]:
+    """Locate the Impact TrueType font file if installed on the system."""
+    candidates: list[Path] = []
+    if os.name == "nt":
+        windir = Path(os.environ.get("WINDIR", r"C:\Windows"))
+        candidates.extend([windir / "Fonts" / "impact.ttf", windir / "Fonts" / "Impact.ttf"])
+        local_app = os.environ.get("LOCALAPPDATA", "")
+        if local_app:
+            candidates.append(Path(local_app) / "Microsoft" / "Windows" / "Fonts" / "impact.ttf")
+    else:
+        candidates.extend(
+            [
+                Path("/System/Library/Fonts/Supplemental/Impact.ttf"),
+                Path("/Library/Fonts/Impact.ttf"),
+                Path.home() / "Library" / "Fonts" / "Impact.ttf",
+                Path("/usr/share/fonts/truetype/msttcorefonts/Impact.ttf"),
+                Path("/usr/share/fonts/truetype/msttcorefonts/impact.ttf"),
+                Path.home() / ".local" / "share" / "fonts" / "Impact.ttf",
+            ]
+        )
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
+def _escape_chars(text: str, chars: str) -> str:
+    return "".join(("\\" + ch) if ch in chars else ch for ch in text)
+
+
+def escape_ffmpeg_drawtext(text: str) -> str:
+    """Escape text for FFmpeg filtergraph drawtext option values (two-level parser)."""
+    level1 = _escape_chars(text, "\\:'")
+    return _escape_chars(level1, "\\',;[]= ")
+
+
+def escape_ffmpeg_filter_path(path: Path) -> str:
+    """Escape a filesystem path for a single-quoted FFmpeg drawtext fontfile value."""
+    posix = str(path).replace("\\", "/")
+    escaped = posix.replace(":", "\\:").replace("'", "\\'")
+    return f"'{escaped}'"
+
+
+def compute_meme_caption_metrics(
+    width: float,
+    height: float,
+    size_scale: float = 1.0,
+) -> tuple[float, int]:
+    """Compute (font_px, border_w) for classic meme Impact captions."""
+    safe_w = max(1.0, float(width))
+    safe_h = max(1.0, float(height))
+    scale = max(0.5, min(2.0, float(size_scale)))
+    font_px = max(12.0, min(safe_h * 0.12, safe_w * 0.085) * scale)
+    border_w = max(2, min(8, int(round(font_px / 10.0))))
+    return font_px, border_w
+
+
+def _estimate_impact_char_width(ch: str, font_px: float) -> float:
+    if ch == " ":
+        return font_px * 0.24
+    if ch in "Iil1|!.,;:'\"":
+        return font_px * 0.28
+    if ch in "WMmw@%&":
+        return font_px * 0.78
+    if ch.islower():
+        return font_px * 0.44
+    return font_px * 0.52
+
+
+def _estimate_impact_text_width(text: str, font_px: float) -> float:
+    return sum(_estimate_impact_char_width(ch, font_px) for ch in text)
+
+
+def wrap_meme_caption(
+    text: str,
+    max_width_px: float,
+    font_px: float,
+    uppercase: bool = True,
+) -> list[str]:
+    """Wrap meme caption text into centered lines fitting within ~90% of max_width_px."""
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    if uppercase:
+        normalized = normalized.upper()
+
+    line_budget = max(font_px * 2.0, float(max_width_px) * 0.90)
+    wrapped: list[str] = []
+
+    for paragraph in normalized.split("\n"):
+        cleaned = " ".join(paragraph.split())
+        if not cleaned:
+            continue
+        words = cleaned.split(" ")
+        current = ""
+        for word in words:
+            candidate = f"{current} {word}".strip() if current else word
+            if _estimate_impact_text_width(candidate, font_px) <= line_budget:
+                current = candidate
+                continue
+
+            if current:
+                wrapped.append(current)
+                current = ""
+
+            if _estimate_impact_text_width(word, font_px) <= line_budget:
+                current = word
+            else:
+                # Hard-split an extra-long single token so it never clips off-frame.
+                chunk = ""
+                for ch in word:
+                    if chunk and _estimate_impact_text_width(chunk + ch, font_px) > line_budget:
+                        wrapped.append(chunk)
+                        chunk = ch
+                    else:
+                        chunk += ch
+                current = chunk
+        if current:
+            wrapped.append(current)
+
+    return wrapped
+
+
+def _estimate_gif_output_size(
+    max_width: Optional[int],
+    source_width: Optional[int],
+    source_height: Optional[int],
+) -> tuple[int, int]:
+    if source_width and source_width > 0 and source_height and source_height > 0:
+        out_w = min(source_width, max_width) if (max_width and max_width > 0) else source_width
+        out_h = max(2, int(round(source_height * (out_w / float(source_width)))))
+        return out_w, out_h
+    est_w = max_width if (max_width and max_width > 0) else 480
+    est_h = max(2, int(round(est_w * 9.0 / 16.0)))
+    return est_w, est_h
+
+
+def _build_gif_caption_filters(
+    caption: Optional[GifCaption],
+    max_width: Optional[int],
+    source_width: Optional[int],
+    source_height: Optional[int],
+) -> list[str]:
+    if caption is None or not caption.is_active():
+        return []
+
+    out_w, out_h = _estimate_gif_output_size(max_width, source_width, source_height)
+    scale = max(0.5, min(2.0, float(caption.size_scale)))
+    est_font_px, border_w = compute_meme_caption_metrics(out_w, out_h, size_scale=scale)
+
+    impact_path = find_impact_font_path()
+    font_opt = (
+        f"fontfile={escape_ffmpeg_filter_path(impact_path)}"
+        if impact_path is not None
+        else "font='Impact'"
+    )
+    h_coef = 0.12 * scale
+    w_coef = 0.085 * scale
+    fs_expr = f"max(12,min(h*{h_coef:.4f},w*{w_coef:.4f}))"
+
+    filters: list[str] = []
+
+    def append_line(line: str, y_expr: str) -> None:
+        esc_text = escape_ffmpeg_drawtext(line)
+        filters.append(
+            f"drawtext={font_opt}:expansion=none:text={esc_text}:"
+            f"fontcolor=white:bordercolor=black:borderw={border_w}:"
+            f"fontsize='{fs_expr}':x='(w-text_w)/2':y='{y_expr}'"
+        )
+
+    top_lines = wrap_meme_caption(caption.top_text, out_w, est_font_px, uppercase=caption.uppercase)
+    for idx, line in enumerate(top_lines):
+        y_expr = f"h*0.04+{idx}*({fs_expr}*1.12)"
+        append_line(line, y_expr)
+
+    bottom_lines = wrap_meme_caption(caption.bottom_text, out_w, est_font_px, uppercase=caption.uppercase)
+    num_bottom = len(bottom_lines)
+    for idx, line in enumerate(bottom_lines):
+        offset_from_bottom = num_bottom - idx
+        y_expr = f"h*0.96-{offset_from_bottom}*({fs_expr}*1.12)"
+        append_line(line, y_expr)
+
+    return filters
+
+
 def build_gif_cmd(
     ffmpeg_path: str,
     input_path: Path,
@@ -400,12 +597,22 @@ def build_gif_cmd(
     fps: int = 15,
     max_width: Optional[int] = 480,
     crop: Optional[CropRect] = None,
+    caption: Optional[GifCaption] = None,
+    source_width: Optional[int] = None,
+    source_height: Optional[int] = None,
 ) -> list[str]:
-    """Build a 2-pass palettegen/paletteuse GIF export command."""
+    """Build a 2-pass palettegen/paletteuse GIF export command with optional meme captions."""
     width_expr = f"'min(iw,{max_width})'" if max_width and max_width > 0 else "iw"
     crop_prefix = f"{crop.to_ffmpeg_filter()}," if crop is not None else ""
+    caption_filters = _build_gif_caption_filters(
+        caption=caption,
+        max_width=max_width,
+        source_width=source_width,
+        source_height=source_height,
+    )
+    caption_suffix = f",{','.join(caption_filters)}" if caption_filters else ""
     filter_complex = (
-        f"[0:v]{crop_prefix}fps={fps},scale={width_expr}:-1:flags=lanczos,"
+        f"[0:v]{crop_prefix}fps={fps},scale={width_expr}:-1:flags=lanczos{caption_suffix},"
         f"split[s0][s1];"
         f"[s0]palettegen=stats_mode=diff[p];"
         f"[s1][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle"

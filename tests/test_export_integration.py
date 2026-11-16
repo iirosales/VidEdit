@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from videdit.exporter import ExportOptions, execute_export
-from videdit.ffmpeg_tools import CropRect, find_ffmpeg_binaries, probe_video
+from videdit.ffmpeg_tools import CropRect, GifCaption, find_ffmpeg_binaries, probe_video
 
 
 @pytest.fixture()
@@ -145,3 +145,96 @@ def test_integration_export_cropped_mp4_and_gif(sample_video: Path, tmp_path: Pa
     gif_info = probe_video(gif_out)
     assert gif_info.width == 320
     assert gif_info.height == 240
+
+
+def test_integration_export_gif_with_meme_captions(tmp_path: Path) -> None:
+    ffmpeg_path, _ = find_ffmpeg_binaries()
+    if not ffmpeg_path:
+        pytest.skip("ffmpeg not available")
+
+    # Neutral gray source makes rendered white/black Impact captions unmistakable.
+    src = tmp_path / "gray_src.mp4"
+    subprocess.run(
+        [
+            ffmpeg_path,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=gray:size=640x360:rate=15:duration=1.5",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            str(src),
+        ],
+        capture_output=True,
+        check=True,
+    )
+    info = probe_video(src)
+    out = tmp_path / "meme.gif"
+
+    result = execute_export(
+        ExportOptions(
+            input_path=src,
+            output_path=out,
+            start_sec=0.0,
+            end_sec=1.0,
+            output_format="gif",
+            video_info=info,
+            gif_fps=12,
+            gif_max_width=480,
+            gif_caption=GifCaption(
+                top_text="WHEN THE BUILD: 100%",
+                bottom_text="IT'S ALIVE; [OK]",
+                size_scale=1.0,
+                uppercase=True,
+            ),
+        )
+    )
+    assert result.exists()
+    assert result.read_bytes()[:6] in (b"GIF87a", b"GIF89a")
+    out_info = probe_video(result)
+    assert out_info.width == 480
+    assert out_info.height == 270
+
+    # Extract raw RGB24 of frame 0 to verify bright white + black outline pixels exist in top/bottom bands.
+    frame_proc = subprocess.run(
+        [
+            ffmpeg_path,
+            "-v",
+            "error",
+            "-i",
+            str(result),
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "pipe:1",
+        ],
+        capture_output=True,
+        check=True,
+    )
+    raw = frame_proc.stdout
+    assert len(raw) == 480 * 270 * 3
+    row_stride = 480 * 3
+
+    def band_min_max_luma(y_start: int, y_end: int) -> tuple[int, int]:
+        band = raw[y_start * row_stride : y_end * row_stride]
+        # Sample every pixel's first channel (grayscale/white/black/gray all have R==G==B).
+        vals = band[0::3]
+        return min(vals), max(vals)
+
+    top_min, top_max = band_min_max_luma(5, 65)
+    mid_min, mid_max = band_min_max_luma(110, 160)
+    bot_min, bot_max = band_min_max_luma(205, 265)
+
+    # Top and bottom bands contain both black outline (< 40) and white fill (> 220).
+    assert top_min < 40 and top_max > 220
+    assert bot_min < 40 and bot_max > 220
+    # Middle band remains untouched gray (~128).
+    assert 90 < mid_min and mid_max < 170

@@ -14,6 +14,7 @@ from PySide6.QtCore import QThread, Signal
 
 from videdit.ffmpeg_tools import (
     CropRect,
+    GifCaption,
     VideoInfo,
     build_gif_cmd,
     build_mp4_quality_cmd,
@@ -45,6 +46,7 @@ class ExportOptions:
     gif_fps: int = 15
     gif_max_width: Optional[int] = 480
     gif_target_size_mb: Optional[float] = None
+    gif_caption: Optional[GifCaption] = None
 
 
 def _cleanup_passlogs(passlog_prefix: Path) -> None:
@@ -143,6 +145,9 @@ def execute_export(
         options.crop,
         options.video_info.width,
         options.video_info.height,
+    )
+    effective_width = (
+        normalized_crop.width if normalized_crop is not None else options.video_info.width
     )
     effective_height = (
         normalized_crop.height if normalized_crop is not None else options.video_info.height
@@ -274,6 +279,9 @@ def execute_export(
             fps=cand_fps,
             max_width=cand_width,
             crop=normalized_crop,
+            caption=options.gif_caption,
+            source_width=effective_width,
+            source_height=effective_height,
         )
         rc, err = run_ffmpeg_with_progress(
             cmd,

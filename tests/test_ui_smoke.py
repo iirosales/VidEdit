@@ -15,7 +15,7 @@ from PySide6.QtGui import QMouseEvent
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import QApplication, QFileDialog, QWidget
 
-from videdit.ffmpeg_tools import find_ffmpeg_binaries
+from videdit.ffmpeg_tools import CropRect, GifCaption, find_ffmpeg_binaries
 from videdit.ui.chrome import CommandPalette
 from videdit.ui.icons import ClockworkSpinner, make_monoline_icon
 from videdit.ui.main_window import (
@@ -486,3 +486,85 @@ def test_default_open_folder_selection_and_persistence(
     finally:
         win2.close()
         qt_app.processEvents()
+
+
+def test_gif_meme_captions_ui_and_live_preview(
+    qt_app: QApplication, main_window: MainWindow, tmp_path: Path
+) -> None:
+    ffmpeg_path, _ = find_ffmpeg_binaries()
+    if not ffmpeg_path:
+        pytest.skip("ffmpeg not available")
+
+    clip = tmp_path / "caption_preview.mp4"
+    subprocess.run(
+        [
+            ffmpeg_path,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=640x360:rate=30:duration=2",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            str(clip),
+        ],
+        capture_output=True,
+        check=True,
+    )
+
+    win = main_window
+    win.resize(920, 640)
+    win.load_video(clip)
+    win._select_format_pill("gif")
+    qt_app.processEvents()
+
+    # Ensure GIF panel controls remain cleanly sized even at minimum window size.
+    assert win._gif_fps_combo.height() >= 28
+    assert win._gif_width_combo.height() >= 28
+    assert win._gif_limit_combo.height() >= 28
+    assert win._gif_caption_size_combo.height() >= 28
+    assert win._gif_caption_caps_check.isChecked()
+    assert win._video_widget.caption_preview() is None
+
+    # Typing top & bottom captions updates the live preview overlay.
+    win._gif_top_caption_edit.setText("Top Meme Text")
+    win._gif_bottom_caption_edit.setText("Bottom Meme Text")
+    win._gif_caption_size_combo.setCurrentIndex(2)  # Large (1.28)
+    win._gif_caption_caps_check.setChecked(False)
+    qt_app.processEvents()
+
+    preview_caption = win._video_widget.caption_preview()
+    assert preview_caption == GifCaption(
+        top_text="Top Meme Text",
+        bottom_text="Bottom Meme Text",
+        size_scale=pytest.approx(1.28),
+        uppercase=False,
+    )
+
+    # Painting both full-frame and cropped preview with captions should succeed cleanly.
+    win._video_widget.resize(640, 360)
+    win._video_widget.repaint()
+    win._video_widget.set_crop_rect(CropRect(80, 40, 400, 240), emit=True)
+    win._video_widget.repaint()
+
+    # Switching to MP4 hides GIF caption preview; switching back restores it.
+    win._select_format_pill("mp4")
+    qt_app.processEvents()
+    assert win._video_widget.caption_preview() is None
+
+    win._select_format_pill("gif")
+    qt_app.processEvents()
+    assert win._video_widget.caption_preview() == preview_caption
+
+    # Clean up state for subsequent tests.
+    win._clear_crop_btn.click()
+    win._gif_top_caption_edit.clear()
+    win._gif_bottom_caption_edit.clear()
+    win._gif_caption_size_combo.setCurrentIndex(1)
+    win._gif_caption_caps_check.setChecked(True)
+    qt_app.processEvents()
+    assert win._video_widget.caption_preview() is None

@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -26,6 +27,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSizeGrip,
+    QSizePolicy,
     QSlider,
     QStackedWidget,
     QVBoxLayout,
@@ -33,7 +35,7 @@ from PySide6.QtWidgets import (
 )
 
 from videdit.exporter import ExportOptions, ExportWorker
-from videdit.ffmpeg_tools import CropRect, VideoInfo, calculate_mp4_encoding_plan, probe_video
+from videdit.ffmpeg_tools import CropRect, GifCaption, VideoInfo, calculate_mp4_encoding_plan, probe_video
 from videdit.ui.chrome import CommandEntry, CommandPalette, DropStageWidget, TitleBar
 from videdit.ui.icons import ClockworkSpinner, make_monoline_icon
 from videdit.ui.theme import ThemeName, ThemeTokens, build_stylesheet, get_theme
@@ -476,31 +478,48 @@ class MainWindow(QMainWindow):
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 4, 0, 0)
-        layout.setSpacing(10)
+        layout.setSpacing(8)
+
+        rate_width_box = QWidget()
+        rate_width_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        rate_width_grid = QGridLayout(rate_width_box)
+        rate_width_grid.setContentsMargins(0, 0, 0, 0)
+        rate_width_grid.setHorizontalSpacing(8)
+        rate_width_grid.setVerticalSpacing(4)
 
         fps_lbl = QLabel("Frame Rate")
         fps_lbl.setObjectName("MutedLabel")
-        layout.addWidget(fps_lbl)
-
-        self._gif_fps_combo = QComboBox()
-        for fps in (10, 15, 20, 24, 30):
-            label = f"{fps} fps (Recommended)" if fps == 15 else f"{fps} fps"
-            self._gif_fps_combo.addItem(label, fps)
-        self._gif_fps_combo.setCurrentIndex(1)
-        layout.addWidget(self._gif_fps_combo)
+        rate_width_grid.addWidget(fps_lbl, 0, 0)
 
         width_lbl = QLabel("Max Width")
         width_lbl.setObjectName("MutedLabel")
-        layout.addWidget(width_lbl)
+        rate_width_grid.addWidget(width_lbl, 0, 1)
+
+        self._gif_fps_combo = QComboBox()
+        self._gif_fps_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self._gif_fps_combo.setMinimumContentsLength(8)
+        self._gif_fps_combo.setMinimumHeight(30)
+        for fps in (10, 15, 20, 24, 30):
+            label = f"{fps} fps (Rec.)" if fps == 15 else f"{fps} fps"
+            self._gif_fps_combo.addItem(label, fps)
+        self._gif_fps_combo.setCurrentIndex(1)
+        rate_width_grid.addWidget(self._gif_fps_combo, 1, 0)
 
         self._gif_width_combo = QComboBox()
-        self._gif_width_combo.addItem("Original Width", None)
+        self._gif_width_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self._gif_width_combo.setMinimumContentsLength(8)
+        self._gif_width_combo.setMinimumHeight(30)
+        self._gif_width_combo.addItem("Original", None)
         self._gif_width_combo.addItem("720 px", 720)
-        self._gif_width_combo.addItem("480 px (Recommended)", 480)
+        self._gif_width_combo.addItem("480 px (Rec.)", 480)
         self._gif_width_combo.addItem("360 px", 360)
         self._gif_width_combo.addItem("240 px", 240)
         self._gif_width_combo.setCurrentIndex(2)
-        layout.addWidget(self._gif_width_combo)
+        rate_width_grid.addWidget(self._gif_width_combo, 1, 1)
+
+        rate_width_grid.setColumnStretch(0, 1)
+        rate_width_grid.setColumnStretch(1, 1)
+        layout.addWidget(rate_width_box)
 
         limit_lbl = QLabel("Auto-Fit Size Limit (Optional)")
         limit_lbl.setObjectName("MutedLabel")
@@ -513,9 +532,38 @@ class MainWindow(QMainWindow):
         self._gif_limit_combo.addItem("20 MB Max", 20.0)
         layout.addWidget(self._gif_limit_combo)
 
+        caption_lbl = QLabel("Meme Captions (Impact)")
+        caption_lbl.setObjectName("MutedLabel")
+        layout.addWidget(caption_lbl)
+
+        self._gif_top_caption_edit = QLineEdit()
+        self._gif_top_caption_edit.setPlaceholderText("Top text (optional)")
+        self._gif_top_caption_edit.setClearButtonEnabled(True)
+        layout.addWidget(self._gif_top_caption_edit)
+
+        self._gif_bottom_caption_edit = QLineEdit()
+        self._gif_bottom_caption_edit.setPlaceholderText("Bottom text (optional)")
+        self._gif_bottom_caption_edit.setClearButtonEnabled(True)
+        layout.addWidget(self._gif_bottom_caption_edit)
+
+        caption_opts_row = QHBoxLayout()
+        caption_opts_row.setSpacing(8)
+        self._gif_caption_size_combo = QComboBox()
+        self._gif_caption_size_combo.addItem("Size: Small", 0.78)
+        self._gif_caption_size_combo.addItem("Size: Medium", 1.0)
+        self._gif_caption_size_combo.addItem("Size: Large", 1.28)
+        self._gif_caption_size_combo.setCurrentIndex(1)
+        caption_opts_row.addWidget(self._gif_caption_size_combo, stretch=1)
+
+        self._gif_caption_caps_check = QCheckBox("ALL CAPS")
+        self._gif_caption_caps_check.setChecked(True)
+        caption_opts_row.addWidget(self._gif_caption_caps_check)
+        layout.addLayout(caption_opts_row)
+
         gif_note = QLabel("Uses 2-pass palette optimization for sharper colors and smaller GIFs.")
         gif_note.setObjectName("MutedLabel")
         gif_note.setWordWrap(True)
+        gif_note.setMinimumHeight(34)
         layout.addWidget(gif_note)
 
         return panel
@@ -561,6 +609,11 @@ class MainWindow(QMainWindow):
         self._custom_mb_spin.valueChanged.connect(self._on_mp4_size_changed)
         self._mp4_res_combo.currentIndexChanged.connect(self._refresh_estimate_and_output)
         self._mute_export_check.toggled.connect(self._refresh_estimate_and_output)
+
+        self._gif_top_caption_edit.textChanged.connect(self._sync_caption_preview)
+        self._gif_bottom_caption_edit.textChanged.connect(self._sync_caption_preview)
+        self._gif_caption_size_combo.currentIndexChanged.connect(self._sync_caption_preview)
+        self._gif_caption_caps_check.toggled.connect(self._sync_caption_preview)
 
         self._browse_btn.clicked.connect(self._choose_output_file)
         self._output_edit.textEdited.connect(self._on_output_edited)
@@ -979,6 +1032,22 @@ class MainWindow(QMainWindow):
         self._options_stack.setCurrentIndex(0 if fmt == "mp4" else 1)
         self._export_btn.setText("Export MP4" if fmt == "mp4" else "Export GIF")
         self._refresh_default_output_path()
+        self._sync_caption_preview()
+
+    def _current_gif_caption(self) -> Optional[GifCaption]:
+        caption = GifCaption(
+            top_text=self._gif_top_caption_edit.text(),
+            bottom_text=self._gif_bottom_caption_edit.text(),
+            size_scale=float(self._gif_caption_size_combo.currentData() or 1.0),
+            uppercase=self._gif_caption_caps_check.isChecked(),
+        )
+        return caption if caption.is_active() else None
+
+    def _sync_caption_preview(self) -> None:
+        if self._output_format == "gif":
+            self._video_widget.set_caption_preview(self._current_gif_caption())
+        else:
+            self._video_widget.set_caption_preview(None)
 
     def _selected_target_mb(self) -> Optional[float]:
         if self._size_buttons["original"].isChecked():
@@ -1104,6 +1173,7 @@ class MainWindow(QMainWindow):
             gif_fps=int(self._gif_fps_combo.currentData()),
             gif_max_width=self._gif_width_combo.currentData(),
             gif_target_size_mb=self._gif_limit_combo.currentData(),
+            gif_caption=self._current_gif_caption(),
         )
 
         self._player.pause()
