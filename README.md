@@ -19,7 +19,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe run.py
 ```
 
-On Windows, you can simply double-click `VidEdit.bat`—it automatically checks for Python 3.10+, FFmpeg, and `.venv` dependencies, installs anything missing on first run, and launches immediately on future runs.
+For my non-technical friends on Windows, you can simply double-click `VidEdit.bat`—it automatically checks for Python 3.10+, FFmpeg, and `.venv` dependencies, installs anything missing on first run, and launches immediately on future runs.
 
 ## Keyboard Shortcuts
 - `Space`: Play / Pause
