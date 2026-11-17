@@ -13,12 +13,17 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from videdit.paths import is_frozen
+
 APP_USER_MODEL_ID = "iirosales.VidEdit.App.1"
 
 
 def build_relaunch_command(project_root: Path) -> str:
     """Build the quoted command Windows uses when relaunching a pinned VidEdit icon."""
     exe = Path(sys.executable)
+    if is_frozen():
+        return f'"{exe}"'
+
     if sys.platform == "win32" and exe.name.lower() == "python.exe":
         pythonw = exe.with_name("pythonw.exe")
         if pythonw.is_file():

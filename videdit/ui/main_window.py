@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 
 from videdit.exporter import ExportOptions, ExportWorker
 from videdit.ffmpeg_tools import CropRect, GifCaption, VideoInfo, calculate_mp4_encoding_plan, probe_video
+from videdit.paths import resolve_resource_path
 from videdit.ui.chrome import CommandEntry, CommandPalette, DropStageWidget, TitleBar
 from videdit.ui.icons import ClockworkSpinner, make_monoline_icon
 from videdit.ui.theme import ThemeName, ThemeTokens, build_stylesheet, get_theme
@@ -83,11 +84,6 @@ def format_file_size(num_bytes: int) -> str:
     return f"{num_bytes} B"
 
 
-def _resolve_icon_path() -> Optional[Path]:
-    candidate = Path(__file__).resolve().parent.parent.parent / "favicon.ico"
-    return candidate if candidate.is_file() else None
-
-
 class MainWindow(QMainWindow):
     """Primary VidEdit desktop interface with dual Alabaster/Midnight themes."""
 
@@ -100,7 +96,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("VidEdit — Cut, GIF & Discord Compressor")
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
 
-        self._icon_path = _resolve_icon_path()
+        self._icon_path = resolve_resource_path("favicon.ico")
         if self._icon_path is not None:
             self.setWindowIcon(QIcon(str(self._icon_path)))
 

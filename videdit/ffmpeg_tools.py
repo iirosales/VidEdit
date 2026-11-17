@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from videdit.paths import bundle_search_dirs, is_frozen
+
 
 def _windows_creation_flags() -> int:
     """Return CREATE_NO_WINDOW on Windows so subprocesses never flash a console."""
@@ -18,10 +20,22 @@ def _windows_creation_flags() -> int:
     return 0
 
 
+def _find_bundled_binary(name: str) -> Optional[str]:
+    """Return path to a bundled executable when running from a frozen app bundle."""
+    if not is_frozen():
+        return None
+    filename = f"{name}.exe" if os.name == "nt" else name
+    for directory in bundle_search_dirs():
+        candidate = directory / filename
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
 def find_ffmpeg_binaries() -> tuple[Optional[str], Optional[str]]:
-    """Locate ffmpeg and ffprobe executables on PATH or standard WinGet locations."""
-    ffmpeg_path = shutil.which("ffmpeg")
-    ffprobe_path = shutil.which("ffprobe")
+    """Locate ffmpeg and ffprobe executables in bundle, PATH, or standard WinGet locations."""
+    ffmpeg_path = _find_bundled_binary("ffmpeg") or shutil.which("ffmpeg")
+    ffprobe_path = _find_bundled_binary("ffprobe") or shutil.which("ffprobe")
 
     if ffmpeg_path and ffprobe_path:
         return ffmpeg_path, ffprobe_path

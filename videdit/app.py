@@ -10,14 +10,14 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from videdit.ffmpeg_tools import find_ffmpeg_binaries
+from videdit.paths import resolve_resource_path
 from videdit.ui.main_window import MainWindow
 from videdit.win_taskbar import set_process_app_user_model_id
 
 
 def resolve_app_icon_path() -> Optional[Path]:
-    """Return the path to favicon.ico in the project root if present."""
-    candidate = Path(__file__).resolve().parent.parent / "favicon.ico"
-    return candidate if candidate.is_file() else None
+    """Return the path to favicon.ico in the app bundle or project root if present."""
+    return resolve_resource_path("favicon.ico")
 
 
 def main() -> int:
