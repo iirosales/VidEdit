@@ -21,6 +21,16 @@ python -m venv .venv
 
 On Windows, you can also double-click `VidEdit.bat` after installing dependencies.
 
+## Build a Standalone Windows `.exe` (Optional)
+
+To package VidEdit into a portable Windows folder (with Python, PySide6, and FFmpeg bundled) that anyone can run without installing dependencies:
+
+```powershell
+.\build_exe.bat
+```
+
+This outputs `dist\VidEdit\VidEdit.exe` and `dist\VidEdit.zip`. Anyone you share `VidEdit.zip` with just needs to unzip it and double-click `VidEdit.exe`.
+
 ## Keyboard Shortcuts
 - `Space`: Play / Pause
 - `I`: Set **In** (Start) point at current playhead
