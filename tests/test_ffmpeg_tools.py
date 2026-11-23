@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from videdit.ffmpeg_tools import (
+    AudioOverlay,
     CropRect,
     GifCaption,
     build_gif_cmd,
@@ -18,6 +19,7 @@ from videdit.ffmpeg_tools import (
     escape_ffmpeg_drawtext,
     normalize_crop_rect,
     parse_ffmpeg_progress_line,
+    parse_ffprobe_audio_json,
     parse_ffprobe_json,
     wrap_meme_caption,
 )
@@ -250,3 +252,65 @@ def test_build_gif_cmd_with_meme_captions() -> None:
     assert "x='(w-text_w)/2'" in fc
     # Captions must run after scale and before palette split.
     assert fc.index("scale='min(iw,480)'") < fc.index("drawtext=") < fc.index("split[s0][s1]")
+
+
+def test_parse_ffprobe_audio_json_and_missing_stream() -> None:
+    payload = {
+        "format": {"duration": "8.25", "size": "131072"},
+        "streams": [{"codec_type": "audio", "codec_name": "mp3"}],
+    }
+    ainfo = parse_ffprobe_audio_json(json.dumps(payload), Path("song.mp3"))
+    assert ainfo.duration_sec == pytest.approx(8.25)
+    assert ainfo.audio_codec == "mp3"
+    assert ainfo.file_size_bytes == 131072
+
+    no_audio_payload = {"format": {"duration": "3.0"}, "streams": [{"codec_type": "video"}]}
+    with pytest.raises(ValueError, match="No audio stream"):
+        parse_ffprobe_audio_json(json.dumps(no_audio_payload), Path("silent.mp4"))
+
+
+def test_build_mp4_cmds_with_audio_overlay() -> None:
+    overlay_mix = AudioOverlay(
+        path=Path("sfx.mp3"),
+        mode="mix",
+        overlay_volume=1.5,
+        video_offset_sec=1.2,
+        audio_start_sec=0.5,
+        audio_end_sec=2.0,
+        loop=True,
+    )
+    cmd_q = build_mp4_quality_cmd(
+        ffmpeg_path="ffmpeg",
+        input_path=Path("vid.mp4"),
+        output_path=Path("out.mp4"),
+        start_sec=0.0,
+        duration_sec=5.0,
+        has_audio=True,
+        mute_audio=False,
+        audio_overlay=overlay_mix,
+    )
+    fc = cmd_q[cmd_q.index("-filter_complex") + 1]
+    assert "atrim=start=0.500:end=2.000" in fc
+    assert "aloop=loop=-1:" in fc
+    assert "adelay=1200|1200" in fc
+    assert "volume=1.500" in fc
+    assert "amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]" in fc
+
+    overlay_rep = AudioOverlay(path=Path("bgm.wav"), mode="replace", video_offset_sec=0.5)
+    plan = calculate_mp4_encoding_plan(5.0, 10.0, has_audio=True, mute_audio=False, source_height=720)
+    p1, p2 = build_mp4_two_pass_cmds(
+        ffmpeg_path="ffmpeg",
+        input_path=Path("vid.mp4"),
+        output_path=Path("out2.mp4"),
+        start_sec=0.0,
+        duration_sec=5.0,
+        plan=plan,
+        passlog_prefix=Path("pass"),
+        audio_overlay=overlay_rep,
+        has_source_audio=True,
+        mute_source_audio=False,
+    )
+    assert "-an" in p1
+    fc2 = p2[p2.index("-filter_complex") + 1]
+    assert "amix=" not in fc2
+    assert "apad=whole_dur=5.000" in fc2

@@ -14,6 +14,7 @@ from PySide6.QtCore import QThread, Signal
 from PySide6.QtGui import QGuiApplication
 
 from videdit.ffmpeg_tools import (
+    AudioOverlay,
     CropRect,
     GifCaption,
     MemeFilterAssets,
@@ -55,6 +56,7 @@ class ExportOptions:
     max_height: Optional[int] = None        # None => Auto (when target size) or Original
     auto_scale_for_target: bool = True
     mute_audio: bool = False
+    audio_overlay: Optional[AudioOverlay] = None
     # GIF options
     gif_fps: int = 15
     gif_max_width: Optional[int] = 480
@@ -431,6 +433,9 @@ def execute_export(
     )
 
     if options.output_format == "mp4":
+        effective_has_audio = options.video_info.has_audio or (options.audio_overlay is not None)
+        effective_mute = options.mute_audio and (options.audio_overlay is None)
+
         if options.target_size_mb is None:
             emit(0, "Encoding MP4 (High Quality)...")
             cmd = build_mp4_quality_cmd(
@@ -443,6 +448,7 @@ def execute_export(
                 mute_audio=options.mute_audio,
                 scale_height=options.max_height,
                 crop=normalized_crop,
+                audio_overlay=options.audio_overlay,
             )
             rc, err = run_ffmpeg_with_progress(
                 cmd,
@@ -467,8 +473,8 @@ def execute_export(
                 plan = calculate_mp4_encoding_plan(
                     duration_sec=duration_sec,
                     target_mb=options.target_size_mb,
-                    has_audio=options.video_info.has_audio,
-                    mute_audio=options.mute_audio,
+                    has_audio=effective_has_audio,
+                    mute_audio=effective_mute,
                     source_height=effective_height,
                     max_height=options.max_height,
                     auto_scale=options.auto_scale_for_target,
@@ -483,6 +489,9 @@ def execute_export(
                     plan=plan,
                     passlog_prefix=passlog_prefix,
                     crop=normalized_crop,
+                    audio_overlay=options.audio_overlay,
+                    has_source_audio=options.video_info.has_audio,
+                    mute_source_audio=options.mute_audio,
                 )
 
                 label_suffix = " (tightening fit)" if attempt > 0 else ""

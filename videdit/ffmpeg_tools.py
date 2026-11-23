@@ -187,8 +187,71 @@ def parse_ffprobe_json(raw_json: str, file_path: Path) -> VideoInfo:
     )
 
 
-def probe_video(file_path: Path, ffprobe_path: Optional[str] = None) -> VideoInfo:
-    """Run ffprobe on a video file and return structured VideoInfo."""
+AUDIO_EXTENSIONS: frozenset[str] = frozenset(
+    {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac", ".opus", ".wma"}
+)
+
+
+@dataclass(frozen=True)
+class AudioInfo:
+    """Metadata probed from an audio file or a video's audio stream."""
+
+    path: Path
+    duration_sec: float
+    audio_codec: str
+    file_size_bytes: int
+
+
+@dataclass(frozen=True)
+class AudioOverlay:
+    """Optional audio track mixed onto or replacing the MP4 clip's original audio."""
+
+    path: Path
+    mode: Literal["mix", "replace"] = "mix"
+    overlay_volume: float = 1.0
+    original_volume: float = 1.0
+    video_offset_sec: float = 0.0
+    audio_start_sec: float = 0.0
+    audio_end_sec: Optional[float] = None
+    loop: bool = False
+
+
+def parse_ffprobe_audio_json(raw_json: str, file_path: Path) -> AudioInfo:
+    """Parse ffprobe JSON output into an AudioInfo instance."""
+    data = json.loads(raw_json)
+    fmt = data.get("format", {})
+    streams = data.get("streams", [])
+
+    audio_stream = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    if audio_stream is None:
+        raise ValueError(f"No audio stream found in {file_path.name}")
+
+    duration_raw = fmt.get("duration") or audio_stream.get("duration") or "0"
+    try:
+        duration_sec = max(0.0, float(duration_raw))
+    except (TypeError, ValueError):
+        duration_sec = 0.0
+
+    size_raw = fmt.get("size")
+    if size_raw is not None:
+        try:
+            file_size_bytes = int(size_raw)
+        except (TypeError, ValueError):
+            file_size_bytes = file_path.stat().st_size if file_path.exists() else 0
+    else:
+        file_size_bytes = file_path.stat().st_size if file_path.exists() else 0
+
+    audio_codec = str(audio_stream.get("codec_name") or "unknown")
+    return AudioInfo(
+        path=file_path,
+        duration_sec=duration_sec,
+        audio_codec=audio_codec,
+        file_size_bytes=file_size_bytes,
+    )
+
+
+def _run_ffprobe_raw(file_path: Path, ffprobe_path: Optional[str] = None) -> str:
+    """Run ffprobe JSON inspection on file_path and return raw stdout."""
     if ffprobe_path is None:
         _, ffprobe_path = find_ffmpeg_binaries()
     if not ffprobe_path:
@@ -214,10 +277,21 @@ def probe_video(file_path: Path, ffprobe_path: Optional[str] = None) -> VideoInf
         check=False,
     )
     if proc.returncode != 0 or not proc.stdout.strip():
-        err = proc.stderr.strip() or "Failed to inspect video metadata."
+        err = proc.stderr.strip() or "Failed to inspect media metadata."
         raise RuntimeError(f"ffprobe failed: {err}")
+    return proc.stdout
 
-    return parse_ffprobe_json(proc.stdout, file_path)
+
+def probe_video(file_path: Path, ffprobe_path: Optional[str] = None) -> VideoInfo:
+    """Run ffprobe on a video file and return structured VideoInfo."""
+    raw_json = _run_ffprobe_raw(file_path, ffprobe_path=ffprobe_path)
+    return parse_ffprobe_json(raw_json, file_path)
+
+
+def probe_audio(file_path: Path, ffprobe_path: Optional[str] = None) -> AudioInfo:
+    """Run ffprobe on an audio or video file and return structured AudioInfo."""
+    raw_json = _run_ffprobe_raw(file_path, ffprobe_path=ffprobe_path)
+    return parse_ffprobe_audio_json(raw_json, file_path)
 
 
 @dataclass(frozen=True)
@@ -305,6 +379,72 @@ def _build_mp4_vf(scale_height: Optional[int], crop: Optional[CropRect] = None) 
     return ",".join(parts)
 
 
+def _build_mp4_audio_overlay_inputs_and_filter(
+    duration_sec: float,
+    vf: str,
+    has_audio: bool,
+    mute_audio: bool,
+    overlay: AudioOverlay,
+) -> tuple[list[str], str]:
+    """Return (extra_input_args, filter_complex) for overlaying an audio track onto MP4."""
+    a_start = max(0.0, float(overlay.audio_start_sec))
+    a_end = (
+        float(overlay.audio_end_sec)
+        if (overlay.audio_end_sec is not None and overlay.audio_end_sec > a_start)
+        else None
+    )
+
+    extra_inputs: list[str] = []
+    if a_end is not None:
+        extra_inputs.extend(["-i", str(overlay.path)])
+    else:
+        if overlay.loop:
+            extra_inputs.extend(["-stream_loop", "-1"])
+        if a_start > 0:
+            extra_inputs.extend(["-ss", f"{a_start:.3f}"])
+        extra_inputs.extend(["-i", str(overlay.path)])
+
+    safe_dur = max(0.1, float(duration_sec))
+    delay_sec = max(0.0, min(max(0.0, safe_dur - 0.05), float(overlay.video_offset_sec)))
+    rem_dur = max(0.05, safe_dur - delay_sec)
+    ov_vol = max(0.0, min(2.0, float(overlay.overlay_volume)))
+    orig_vol = max(0.0, min(2.0, float(overlay.original_volume)))
+
+    aov_ops: list[str] = ["aformat=sample_rates=44100:channel_layouts=stereo"]
+    if a_end is not None:
+        aov_ops.append(f"atrim=start={a_start:.3f}:end={a_end:.3f}")
+        aov_ops.append("asetpts=PTS-STARTPTS")
+        if overlay.loop:
+            slice_samples = max(1024, int(round((a_end - a_start) * 44100.0)))
+            aov_ops.append(f"aloop=loop=-1:size={slice_samples}")
+    aov_ops.extend(
+        [
+            f"atrim=0:{rem_dur:.3f}",
+            "asetpts=PTS-STARTPTS",
+            f"volume={ov_vol:.3f}",
+        ]
+    )
+    if delay_sec > 0.001:
+        delay_ms = int(round(delay_sec * 1000.0))
+        aov_ops.append(f"adelay={delay_ms}|{delay_ms}")
+
+    parts = [f"[0:v]{vf}[vout]"]
+    if overlay.mode == "mix" and has_audio and not mute_audio:
+        parts.append(
+            f"[0:a]atrim=0:{safe_dur:.3f},asetpts=PTS-STARTPTS,volume={orig_vol:.3f},"
+            f"aformat=sample_rates=44100:channel_layouts=stereo[abase]"
+        )
+        parts.append(f"[1:a]{','.join(aov_ops)}[aov]")
+        parts.append("[abase][aov]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]")
+    else:
+        if delay_sec > 0.001:
+            aov_ops.append(f"apad=whole_dur={safe_dur:.3f}")
+            aov_ops.append(f"atrim=0:{safe_dur:.3f}")
+        parts.append(f"[1:a]{','.join(aov_ops)}[aout]")
+
+    return extra_inputs, ";".join(parts)
+
+
 def build_mp4_quality_cmd(
     ffmpeg_path: str,
     input_path: Path,
@@ -316,19 +456,63 @@ def build_mp4_quality_cmd(
     scale_height: Optional[int] = None,
     crf: int = 20,
     crop: Optional[CropRect] = None,
+    audio_overlay: Optional[AudioOverlay] = None,
 ) -> list[str]:
-    """Build a single-pass high-quality H.264 MP4 trim command."""
-    cmd = [
+    """Build a single-pass high-quality H.264 MP4 trim command (with optional audio overlay)."""
+    vf = _build_mp4_vf(scale_height, crop=crop)
+    if audio_overlay is None:
+        cmd = [
+            ffmpeg_path,
+            "-y",
+            "-ss",
+            f"{start_sec:.3f}",
+            "-i",
+            str(input_path),
+            "-t",
+            f"{duration_sec:.3f}",
+            "-vf",
+            vf,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "medium",
+            "-crf",
+            str(crf),
+            "-pix_fmt",
+            "yuv420p",
+        ]
+        if has_audio and not mute_audio:
+            cmd.extend(["-c:a", "aac", "-b:a", "192k"])
+        else:
+            cmd.append("-an")
+        cmd.extend(["-movflags", "+faststart", "-progress", "pipe:1", "-nostats", str(output_path)])
+        return cmd
+
+    extra_inputs, filter_complex = _build_mp4_audio_overlay_inputs_and_filter(
+        duration_sec=duration_sec,
+        vf=vf,
+        has_audio=has_audio,
+        mute_audio=mute_audio,
+        overlay=audio_overlay,
+    )
+    return [
         ffmpeg_path,
         "-y",
         "-ss",
         f"{start_sec:.3f}",
-        "-i",
-        str(input_path),
         "-t",
         f"{duration_sec:.3f}",
-        "-vf",
-        _build_mp4_vf(scale_height, crop=crop),
+        "-i",
+        str(input_path),
+        *extra_inputs,
+        "-filter_complex",
+        filter_complex,
+        "-map",
+        "[vout]",
+        "-map",
+        "[aout]",
+        "-t",
+        f"{duration_sec:.3f}",
         "-c:v",
         "libx264",
         "-preset",
@@ -337,14 +521,17 @@ def build_mp4_quality_cmd(
         str(crf),
         "-pix_fmt",
         "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-movflags",
+        "+faststart",
+        "-progress",
+        "pipe:1",
+        "-nostats",
+        str(output_path),
     ]
-    if has_audio and not mute_audio:
-        cmd.extend(["-c:a", "aac", "-b:a", "192k"])
-    else:
-        cmd.append("-an")
-
-    cmd.extend(["-movflags", "+faststart", "-progress", "pipe:1", "-nostats", str(output_path)])
-    return cmd
 
 
 def build_mp4_two_pass_cmds(
@@ -356,9 +543,13 @@ def build_mp4_two_pass_cmds(
     plan: Mp4Plan,
     passlog_prefix: Path,
     crop: Optional[CropRect] = None,
+    audio_overlay: Optional[AudioOverlay] = None,
+    has_source_audio: bool = True,
+    mute_source_audio: bool = False,
 ) -> tuple[list[str], list[str]]:
     """Build Pass 1 and Pass 2 FFmpeg commands for size-targeted MP4 compression."""
-    common_input = [
+    vf = _build_mp4_vf(plan.scale_height, crop=crop)
+    common_pass1 = [
         ffmpeg_path,
         "-y",
         "-ss",
@@ -368,7 +559,7 @@ def build_mp4_two_pass_cmds(
         "-t",
         f"{duration_sec:.3f}",
         "-vf",
-        _build_mp4_vf(plan.scale_height, crop=crop),
+        vf,
         "-c:v",
         "libx264",
         "-preset",
@@ -382,7 +573,7 @@ def build_mp4_two_pass_cmds(
     ]
 
     pass1_cmd = [
-        *common_input,
+        *common_pass1,
         "-pass",
         "1",
         "-an",
@@ -394,16 +585,59 @@ def build_mp4_two_pass_cmds(
         os.devnull,
     ]
 
+    if audio_overlay is None:
+        pass2_cmd = [
+            *common_pass1,
+            "-pass",
+            "2",
+        ]
+        if plan.audio_kbps > 0:
+            pass2_cmd.extend(["-c:a", "aac", "-b:a", f"{plan.audio_kbps}k"])
+        else:
+            pass2_cmd.append("-an")
+        pass2_cmd.extend(["-movflags", "+faststart", "-progress", "pipe:1", "-nostats", str(output_path)])
+        return pass1_cmd, pass2_cmd
+
+    extra_inputs, filter_complex = _build_mp4_audio_overlay_inputs_and_filter(
+        duration_sec=duration_sec,
+        vf=vf,
+        has_audio=has_source_audio,
+        mute_audio=mute_source_audio,
+        overlay=audio_overlay,
+    )
     pass2_cmd = [
-        *common_input,
+        ffmpeg_path,
+        "-y",
+        "-ss",
+        f"{start_sec:.3f}",
+        "-t",
+        f"{duration_sec:.3f}",
+        "-i",
+        str(input_path),
+        *extra_inputs,
+        "-filter_complex",
+        filter_complex,
+        "-map",
+        "[vout]",
+        "-map",
+        "[aout]",
+        "-t",
+        f"{duration_sec:.3f}",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "medium",
+        "-b:v",
+        f"{plan.video_kbps}k",
+        "-pix_fmt",
+        "yuv420p",
+        "-passlogfile",
+        str(passlog_prefix),
         "-pass",
         "2",
     ]
-    if plan.audio_kbps > 0:
-        pass2_cmd.extend(["-c:a", "aac", "-b:a", f"{plan.audio_kbps}k"])
-    else:
-        pass2_cmd.append("-an")
-
+    audio_kbps = max(24, plan.audio_kbps) if plan.audio_kbps > 0 else 64
+    pass2_cmd.extend(["-c:a", "aac", "-b:a", f"{audio_kbps}k"])
     pass2_cmd.extend(["-movflags", "+faststart", "-progress", "pipe:1", "-nostats", str(output_path)])
     return pass1_cmd, pass2_cmd
 

@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSizeGrip,
     QSizePolicy,
     QSlider,
@@ -36,7 +37,17 @@ from PySide6.QtWidgets import (
 )
 
 from videdit.exporter import ExportOptions, ExportWorker
-from videdit.ffmpeg_tools import CropRect, GifCaption, VideoInfo, calculate_mp4_encoding_plan, probe_video
+from videdit.ffmpeg_tools import (
+    AUDIO_EXTENSIONS,
+    AudioInfo,
+    AudioOverlay,
+    CropRect,
+    GifCaption,
+    VideoInfo,
+    calculate_mp4_encoding_plan,
+    probe_audio,
+    probe_video,
+)
 from videdit.meme_project import (
     ALL_MEDIA_EXTENSIONS,
     BaseLayer,
@@ -150,10 +161,18 @@ class MainWindow(QMainWindow):
         self._still_timer.setInterval(33)
         self._still_timer.timeout.connect(self._on_still_timer_tick)
 
+        self._mp4_audio_info: Optional[AudioInfo] = None
+        self._preview_muted: bool = False
+
         self._player = QMediaPlayer(self)
         self._audio_output = QAudioOutput(self)
         self._audio_output.setVolume(0.8)
         self._player.setAudioOutput(self._audio_output)
+
+        self._mp4_audio_player = QMediaPlayer(self)
+        self._mp4_audio_output = QAudioOutput(self)
+        self._mp4_audio_output.setVolume(0.8)
+        self._mp4_audio_player.setAudioOutput(self._mp4_audio_output)
 
         self._build_ui()
         self._connect_signals()
@@ -269,6 +288,35 @@ class MainWindow(QMainWindow):
 
         self._timeline = TrimTimelineWidget()
         trim_layout.addWidget(self._timeline)
+
+        # Second trim bar for MP4 audio overlay (shown when audio is attached)
+        self._audio_timeline_row = QWidget()
+        aud_tl_layout = QVBoxLayout(self._audio_timeline_row)
+        aud_tl_layout.setContentsMargins(0, 2, 0, 0)
+        aud_tl_layout.setSpacing(4)
+
+        aud_hdr = QHBoxLayout()
+        aud_hdr.setSpacing(6)
+        self._audio_bar_label = QLabel("Audio Track")
+        self._audio_bar_label.setObjectName("MutedLabel")
+        self._audio_reset_btn = QPushButton("Reset Audio")
+        self._audio_in_badge = QLabel("In: 00:00.00")
+        self._audio_in_badge.setObjectName("BadgeLabel")
+        self._audio_out_badge = QLabel("Out: 00:00.00")
+        self._audio_out_badge.setObjectName("BadgeLabel")
+        self._audio_dur_badge = QLabel("Audio: 0.00s")
+        self._audio_dur_badge.setObjectName("BadgeLabel")
+        aud_hdr.addWidget(self._audio_bar_label, stretch=1)
+        aud_hdr.addWidget(self._audio_reset_btn)
+        aud_hdr.addWidget(self._audio_in_badge)
+        aud_hdr.addWidget(self._audio_out_badge)
+        aud_hdr.addWidget(self._audio_dur_badge)
+
+        self._audio_timeline = TrimTimelineWidget()
+        aud_tl_layout.addWidget(self._audio_timeline)
+        aud_tl_layout.addLayout(aud_hdr)
+        self._audio_timeline_row.setVisible(False)
+        trim_layout.addWidget(self._audio_timeline_row)
 
         trim_actions = QHBoxLayout()
         trim_actions.setSpacing(8)
@@ -444,10 +492,15 @@ class MainWindow(QMainWindow):
         shell_layout.addWidget(status_bar)
 
     def _build_mp4_panel(self) -> QWidget:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
         panel = QWidget()
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 4, 0, 0)
-        layout.setSpacing(10)
+        layout.setContentsMargins(0, 4, 4, 4)
+        layout.setSpacing(8)
 
         size_lbl = QLabel("Target File Size (Discord Compression)")
         size_lbl.setObjectName("MutedLabel")
@@ -504,6 +557,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(res_lbl)
 
         self._mp4_res_combo = QComboBox()
+        self._mp4_res_combo.setMinimumHeight(28)
         self._mp4_res_combo.addItem("Auto (Recommended for Target Size)", ("auto", None))
         self._mp4_res_combo.addItem("Original Resolution", ("fixed", None))
         self._mp4_res_combo.addItem("1080p Max", ("fixed", 1080))
@@ -511,15 +565,83 @@ class MainWindow(QMainWindow):
         self._mp4_res_combo.addItem("480p Max", ("fixed", 480))
         layout.addWidget(self._mp4_res_combo)
 
-        self._mute_export_check = QCheckBox("Remove Audio (Mute Export)")
+        self._mute_export_check = QCheckBox("Mute Video Audio (Preview & Export)")
         layout.addWidget(self._mute_export_check)
+
+        # Optional Audio Overlay section
+        audio_lbl = QLabel("Audio Overlay (Optional)")
+        audio_lbl.setObjectName("MutedLabel")
+        layout.addWidget(audio_lbl)
+
+        audio_pick_row = QHBoxLayout()
+        audio_pick_row.setSpacing(6)
+        self._mp4_audio_btn = QPushButton("Add Audio...")
+        self._mp4_audio_btn.setToolTip("Overlay an MP3/WAV/M4A/OGG or another video's audio onto this clip")
+        self._mp4_audio_label = QLabel("None")
+        self._mp4_audio_label.setObjectName("MutedLabel")
+        self._mp4_audio_clear_btn = QPushButton("×")
+        self._mp4_audio_clear_btn.setFixedSize(26, 26)
+        self._mp4_audio_clear_btn.setProperty("danger", True)
+        self._mp4_audio_clear_btn.setToolTip("Remove audio overlay")
+        self._mp4_audio_clear_btn.setVisible(False)
+        audio_pick_row.addWidget(self._mp4_audio_btn)
+        audio_pick_row.addWidget(self._mp4_audio_label, stretch=1)
+        audio_pick_row.addWidget(self._mp4_audio_clear_btn)
+        layout.addLayout(audio_pick_row)
+
+        self._mp4_audio_opts_box = QFrame()
+        self._mp4_audio_opts_box.setObjectName("Card")
+        ao_layout = QVBoxLayout(self._mp4_audio_opts_box)
+        ao_layout.setContentsMargins(8, 8, 8, 8)
+        ao_layout.setSpacing(6)
+
+        self._mp4_audio_mode_combo = QComboBox()
+        self._mp4_audio_mode_combo.setMinimumHeight(28)
+        self._mp4_audio_mode_combo.addItem("Mix with Video Audio", "mix")
+        self._mp4_audio_mode_combo.addItem("Replace Video Audio", "replace")
+        ao_layout.addWidget(self._mp4_audio_mode_combo)
+
+        vol_row = QHBoxLayout()
+        vol_row.setSpacing(6)
+        vol_lbl = QLabel("Overlay Vol")
+        vol_lbl.setObjectName("MutedLabel")
+        self._mp4_audio_vol_slider = QSlider(Qt.Orientation.Horizontal)
+        self._mp4_audio_vol_slider.setRange(0, 200)
+        self._mp4_audio_vol_slider.setValue(100)
+        self._mp4_audio_vol_val = QLabel("100%")
+        self._mp4_audio_vol_val.setObjectName("MutedLabel")
+        vol_row.addWidget(vol_lbl)
+        vol_row.addWidget(self._mp4_audio_vol_slider, stretch=1)
+        vol_row.addWidget(self._mp4_audio_vol_val)
+        ao_layout.addLayout(vol_row)
+
+        offset_row = QHBoxLayout()
+        offset_row.setSpacing(6)
+        start_lbl = QLabel("Start at (Video)")
+        start_lbl.setObjectName("MutedLabel")
+        self._mp4_audio_offset_spin = QDoubleSpinBox()
+        self._mp4_audio_offset_spin.setRange(0.0, 600.0)
+        self._mp4_audio_offset_spin.setDecimals(1)
+        self._mp4_audio_offset_spin.setSingleStep(0.5)
+        self._mp4_audio_offset_spin.setSuffix(" s")
+        offset_row.addWidget(start_lbl)
+        offset_row.addWidget(self._mp4_audio_offset_spin, stretch=1)
+        ao_layout.addLayout(offset_row)
+
+        self._mp4_audio_loop_check = QCheckBox("Loop Audio to Fit Clip")
+        ao_layout.addWidget(self._mp4_audio_loop_check)
+
+        self._mp4_audio_opts_box.setVisible(False)
+        layout.addWidget(self._mp4_audio_opts_box)
 
         self._mp4_estimate_label = QLabel("")
         self._mp4_estimate_label.setObjectName("MutedLabel")
         self._mp4_estimate_label.setWordWrap(True)
         layout.addWidget(self._mp4_estimate_label)
+        layout.addStretch(1)
 
-        return panel
+        scroll.setWidget(panel)
+        return scroll
 
     def _build_gif_panel(self) -> QWidget:
         self._meme_panel = MemePanel()
@@ -545,7 +667,7 @@ class MainWindow(QMainWindow):
         self._step_back_btn.clicked.connect(lambda: self._step_by_ms(-100))
         self._step_fwd_btn.clicked.connect(lambda: self._step_by_ms(100))
         self._mute_preview_btn.clicked.connect(self._toggle_preview_mute)
-        self._volume_slider.valueChanged.connect(lambda v: self._audio_output.setVolume(v / 100.0))
+        self._volume_slider.valueChanged.connect(self._on_preview_volume_changed)
 
         self._set_in_btn.clicked.connect(self._set_in_at_playhead)
         self._set_out_btn.clicked.connect(self._set_out_at_playhead)
@@ -563,6 +685,11 @@ class MainWindow(QMainWindow):
         self._timeline.seek_requested.connect(self._seek_to_ms)
         self._timeline.trim_changed.connect(self._on_trim_changed)
 
+        self._audio_timeline.seek_requested.connect(self._seek_audio_to_ms)
+        self._audio_timeline.trim_changed.connect(self._on_audio_trim_changed)
+        self._audio_reset_btn.clicked.connect(self._reset_audio_trim)
+        self._mp4_audio_player.durationChanged.connect(self._on_audio_player_duration_changed)
+
         self._player.positionChanged.connect(self._on_player_position_changed)
         self._player.durationChanged.connect(self._on_player_duration_changed)
         self._player.playbackStateChanged.connect(self._on_playback_state_changed)
@@ -575,7 +702,14 @@ class MainWindow(QMainWindow):
             btn.clicked.connect(self._on_mp4_size_changed)
         self._custom_mb_spin.valueChanged.connect(self._on_mp4_size_changed)
         self._mp4_res_combo.currentIndexChanged.connect(self._refresh_estimate_and_output)
-        self._mute_export_check.toggled.connect(self._refresh_estimate_and_output)
+        self._mute_export_check.toggled.connect(self._on_mp4_audio_settings_changed)
+
+        self._mp4_audio_btn.clicked.connect(self._choose_mp4_audio_file)
+        self._mp4_audio_clear_btn.clicked.connect(self.clear_mp4_audio_overlay)
+        self._mp4_audio_mode_combo.currentIndexChanged.connect(self._on_mp4_audio_settings_changed)
+        self._mp4_audio_vol_slider.valueChanged.connect(self._on_mp4_audio_vol_changed)
+        self._mp4_audio_offset_spin.valueChanged.connect(self._on_mp4_audio_settings_changed)
+        self._mp4_audio_loop_check.toggled.connect(self._on_mp4_audio_settings_changed)
 
         self._meme_panel.add_media_requested.connect(self._choose_overlay_files)
         self._meme_panel.add_text_requested.connect(self.add_text_overlay)
@@ -644,6 +778,7 @@ class MainWindow(QMainWindow):
             self.setStyleSheet(qss)
 
         self._timeline.apply_theme(self._theme)
+        self._audio_timeline.apply_theme(self._theme)
         self._drop_stage.apply_theme(self._theme)
         self._video_widget.apply_theme(self._theme)
         self._meme_panel.apply_theme(self._theme)
@@ -669,7 +804,7 @@ class MainWindow(QMainWindow):
             or self._still_playing
         )
         self._play_btn.setIcon(make_monoline_icon("pause" if is_playing else "play", c))
-        is_muted = self._audio_output.isMuted()
+        is_muted = self._preview_muted
         self._mute_preview_btn.setIcon(make_monoline_icon("muted" if is_muted else "volume", c))
         theme_icon = "theme_light" if self._theme.name == "light" else "theme_dark"
         self._theme_toggle_btn.setIcon(make_monoline_icon(theme_icon, self._theme.text_muted, size=14))
@@ -680,6 +815,8 @@ class MainWindow(QMainWindow):
             CommandEntry("Open Video or Image...", "Click", self._choose_input_file),
             CommandEntry("Set Default Open Folder...", "", self._choose_default_open_folder),
             CommandEntry("Reset Default Open Folder", "", self._reset_default_open_folder),
+            CommandEntry("Add MP4 Audio Overlay...", "", self._choose_mp4_audio_file),
+            CommandEntry("Clear MP4 Audio Overlay", "", self.clear_mp4_audio_overlay),
             CommandEntry("Add Overlay Image / Video...", "", self._choose_overlay_files),
             CommandEntry("Add Meme Text Box", "", self.add_text_overlay),
             CommandEntry("Play / Pause Preview", "Space", self._toggle_play_pause),
@@ -752,23 +889,38 @@ class MainWindow(QMainWindow):
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
-                if url.isLocalFile() and Path(url.toLocalFile()).suffix.lower() in SUPPORTED_EXTENSIONS:
-                    event.acceptProposedAction()
-                    return
+                if url.isLocalFile():
+                    ext = Path(url.toLocalFile()).suffix.lower()
+                    if ext in SUPPORTED_EXTENSIONS or (
+                        ext in AUDIO_EXTENSIONS and self._video_info is not None
+                    ):
+                        event.acceptProposedAction()
+                        return
         event.ignore()
 
     def dropEvent(self, event: QDropEvent) -> None:
-        paths: list[Path] = []
+        media_paths: list[Path] = []
+        audio_paths: list[Path] = []
         for url in event.mimeData().urls():
             if url.isLocalFile():
                 p = Path(url.toLocalFile())
-                if p.suffix.lower() in SUPPORTED_EXTENSIONS:
-                    paths.append(p)
-        if not paths:
+                ext = p.suffix.lower()
+                if ext in AUDIO_EXTENSIONS:
+                    audio_paths.append(p)
+                elif ext in SUPPORTED_EXTENSIONS:
+                    media_paths.append(p)
+        if audio_paths and not media_paths and self._video_info is not None:
+            event.acceptProposedAction()
+            self._select_format_pill("mp4")
+            self.load_mp4_audio_overlay(audio_paths[0])
+            return
+        if not media_paths:
             return
         event.acceptProposedAction()
         as_overlays = self._output_format == "gif" and self._base_asset is not None
-        self.load_media_files(paths, add_as_overlays=as_overlays)
+        self.load_media_files(media_paths, add_as_overlays=as_overlays)
+        if audio_paths and self._video_info is not None and self._output_format == "mp4":
+            self.load_mp4_audio_overlay(audio_paths[0])
 
     def default_open_dir(self) -> Path:
         """Return the configured default folder for Open Video, or the OS fallback."""
@@ -878,7 +1030,9 @@ class MainWindow(QMainWindow):
 
         self._stop_still_playback()
         self._player.stop()
+        self.clear_mp4_audio_overlay()
         self._player.setSource(QUrl())
+        self.clear_mp4_audio_overlay()
 
         try:
             asset = probe_media_asset(path)
@@ -950,6 +1104,7 @@ class MainWindow(QMainWindow):
 
         self._stop_still_playback()
         self._player.stop()
+        self.clear_mp4_audio_overlay()
         try:
             info = probe_video(path)
             asset = MediaAssetInfo(
@@ -1223,6 +1378,189 @@ class MainWindow(QMainWindow):
         self._update_time_label(self._still_pos_ms)
         self._video_widget.set_playhead_sec(self._still_pos_ms / 1000.0)
 
+    def _choose_mp4_audio_file(self) -> None:
+        if self._video_info is None:
+            QMessageBox.information(self, "No Video Loaded", "Open a video first before adding an audio overlay.")
+            return
+        path_str, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Audio or Video Track",
+            str(self.default_open_dir()),
+            "Audio & Video (*.mp3 *.wav *.m4a *.aac *.ogg *.flac *.opus *.wma *.mp4 *.mov *.mkv *.webm);;All Files (*)",
+        )
+        if path_str:
+            self.load_mp4_audio_overlay(Path(path_str))
+
+    def load_mp4_audio_overlay(self, path: Path) -> None:
+        """Probe and attach an audio file (or video audio track) to the MP4 export."""
+        if self._video_info is None:
+            return
+        try:
+            ainfo = probe_audio(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Could Not Open Audio", str(exc))
+            return
+
+        self._mp4_audio_info = ainfo
+        self._mp4_audio_player.stop()
+        self._mp4_audio_player.setSource(QUrl.fromLocalFile(str(path)))
+        self._mp4_audio_player.pause()
+
+        aud_ms = max(200, int(round(ainfo.duration_sec * 1000))) if ainfo.duration_sec > 0 else 5000
+        self._audio_timeline.set_duration(aud_ms)
+        self._on_audio_trim_changed(0, aud_ms)
+        self._audio_bar_label.setText(f"Audio: {path.name}")
+        self._audio_timeline_row.setVisible(self._output_format == "mp4")
+
+        dur_label = f"{ainfo.duration_sec:.1f}s" if ainfo.duration_sec > 0 else "audio"
+        self._mp4_audio_label.setText(f"{path.name} ({dur_label})")
+        self._mp4_audio_label.setToolTip(str(path))
+        self._mp4_audio_clear_btn.setVisible(True)
+        self._mp4_audio_opts_box.setVisible(True)
+        if not self._video_info.has_audio:
+            idx = self._mp4_audio_mode_combo.findData("replace")
+            if idx >= 0:
+                self._mp4_audio_mode_combo.setCurrentIndex(idx)
+        self._refresh_estimate_and_output()
+        self._sync_mp4_audio_preview(
+            self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState,
+            self._player.position(),
+        )
+
+    def clear_mp4_audio_overlay(self) -> None:
+        """Detach any active MP4 audio overlay and restore normal preview audio."""
+        self._mp4_audio_info = None
+        self._mp4_audio_player.stop()
+        self._mp4_audio_player.setSource(QUrl())
+        self._audio_timeline.set_duration(0)
+        self._audio_timeline_row.setVisible(False)
+        self._mp4_audio_label.setText("None")
+        self._mp4_audio_label.setToolTip("")
+        self._mp4_audio_clear_btn.setVisible(False)
+        self._mp4_audio_opts_box.setVisible(False)
+        self._audio_output.setMuted(self._preview_muted or self._mute_export_check.isChecked())
+        self._refresh_estimate_and_output()
+
+    def _on_audio_player_duration_changed(self, duration_ms: int) -> None:
+        if duration_ms > 0 and self._mp4_audio_info is not None and self._mp4_audio_info.duration_sec <= 0:
+            self._audio_timeline.set_duration(duration_ms)
+            self._on_audio_trim_changed(0, duration_ms)
+
+    def _on_audio_trim_changed(self, in_ms: int, out_ms: int) -> None:
+        self._audio_in_badge.setText(f"In: {format_timestamp_ms(in_ms)}")
+        self._audio_out_badge.setText(f"Out: {format_timestamp_ms(out_ms)}")
+        dur_sec = max(0.0, (out_ms - in_ms) / 1000.0)
+        self._audio_dur_badge.setText(f"Audio: {dur_sec:.2f}s")
+        self._sync_mp4_audio_preview(
+            self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState,
+            self._player.position(),
+        )
+
+    def _seek_audio_to_ms(self, ms: int) -> None:
+        if self._mp4_audio_info is None:
+            return
+        self._audio_timeline.set_position(ms)
+        self._mp4_audio_player.setPosition(ms)
+
+    def _reset_audio_trim(self) -> None:
+        if self._mp4_audio_info is None:
+            return
+        dur_ms = max(200, int(round(self._mp4_audio_info.duration_sec * 1000)))
+        if self._mp4_audio_player.duration() > 0:
+            dur_ms = self._mp4_audio_player.duration()
+        self._audio_timeline.set_trim_points(0, dur_ms, emit=True)
+
+    def _current_mp4_audio_overlay(self) -> Optional[AudioOverlay]:
+        if self._mp4_audio_info is None:
+            return None
+        mode = str(self._mp4_audio_mode_combo.currentData() or "mix")
+        return AudioOverlay(
+            path=self._mp4_audio_info.path,
+            mode="replace" if mode == "replace" else "mix",
+            overlay_volume=self._mp4_audio_vol_slider.value() / 100.0,
+            original_volume=1.0,
+            video_offset_sec=float(self._mp4_audio_offset_spin.value()),
+            audio_start_sec=self._audio_timeline.in_ms() / 1000.0,
+            audio_end_sec=self._audio_timeline.out_ms() / 1000.0,
+            loop=self._mp4_audio_loop_check.isChecked(),
+        )
+
+    def _on_mp4_audio_vol_changed(self, value: int) -> None:
+        self._mp4_audio_vol_val.setText(f"{value}%")
+        self._sync_mp4_audio_preview(
+            self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState,
+            self._player.position(),
+        )
+
+    def _on_mp4_audio_settings_changed(self, *_args) -> None:
+        self._refresh_estimate_and_output()
+        self._sync_mp4_audio_preview(
+            self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState,
+            self._player.position(),
+        )
+
+    def _on_preview_volume_changed(self, value: int) -> None:
+        vol = value / 100.0
+        self._audio_output.setVolume(vol)
+        ov_factor = (self._mp4_audio_vol_slider.value() / 100.0) if self._mp4_audio_info else 1.0
+        self._mp4_audio_output.setVolume(min(1.0, vol * ov_factor))
+
+    def _sync_mp4_audio_preview(self, playing: bool, pos_ms: int) -> None:
+        mute_video_flag = self._output_format == "mp4" and self._mute_export_check.isChecked()
+        if (
+            self._mp4_audio_info is None
+            or self._output_format != "mp4"
+            or (self._base_asset is not None and self._base_asset.kind == "image")
+        ):
+            self._audio_output.setMuted(self._preview_muted or mute_video_flag)
+            if self._mp4_audio_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+                self._mp4_audio_player.pause()
+            return
+
+        overlay = self._current_mp4_audio_overlay()
+        assert overlay is not None
+        mute_orig = self._preview_muted or overlay.mode == "replace" or mute_video_flag
+        self._audio_output.setMuted(mute_orig)
+        self._mp4_audio_output.setMuted(self._preview_muted)
+        base_vol = self._volume_slider.value() / 100.0
+        self._mp4_audio_output.setVolume(min(1.0, base_vol * overlay.overlay_volume))
+
+        self._mp4_audio_player.setLoops(QMediaPlayer.Loops.Once)
+        in_ms = self._timeline.in_ms()
+        offset_ms = int(round(overlay.video_offset_sec * 1000.0))
+        audio_in_ms = self._audio_timeline.in_ms()
+        audio_out_ms = self._audio_timeline.out_ms()
+        slice_ms = max(200, audio_out_ms - audio_in_ms)
+        rel_ms = (pos_ms - in_ms) - offset_ms
+
+        if rel_ms < 0:
+            self._audio_timeline.set_position(audio_in_ms)
+            if self._mp4_audio_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+                self._mp4_audio_player.pause()
+            return
+
+        if rel_ms >= slice_ms:
+            if overlay.loop:
+                target_ms = audio_in_ms + (rel_ms % slice_ms)
+            else:
+                self._audio_timeline.set_position(audio_out_ms)
+                if self._mp4_audio_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+                    self._mp4_audio_player.pause()
+                return
+        else:
+            target_ms = audio_in_ms + rel_ms
+
+        self._audio_timeline.set_position(target_ms)
+        if abs(self._mp4_audio_player.position() - target_ms) > 200 or not playing:
+            self._mp4_audio_player.setPosition(target_ms)
+
+        if playing:
+            if self._mp4_audio_player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
+                self._mp4_audio_player.play()
+        else:
+            if self._mp4_audio_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+                self._mp4_audio_player.pause()
+
     def _toggle_play_pause(self) -> None:
         if self._video_info is None:
             return
@@ -1246,6 +1584,7 @@ class MainWindow(QMainWindow):
         if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self._player.pause()
             self._video_widget.sync_overlay_playback(False, self._player.position())
+            self._sync_mp4_audio_preview(False, self._player.position())
         else:
             pos = self._player.position()
             in_ms = self._timeline.in_ms()
@@ -1256,6 +1595,7 @@ class MainWindow(QMainWindow):
                 pos = in_ms
             self._player.play()
             self._video_widget.sync_overlay_playback(True, pos)
+            self._sync_mp4_audio_preview(True, pos)
 
     def _step_by_ms(self, delta_ms: int) -> None:
         if self._video_info is None or self._duration_ms <= 0:
@@ -1282,16 +1622,20 @@ class MainWindow(QMainWindow):
         self._timeline.set_position(ms)
         self._update_time_label(ms)
         self._video_widget.set_playhead_sec(ms / 1000.0)
-        self._video_widget.sync_overlay_playback(
-            self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState,
-            ms,
-        )
+        is_playing = self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        self._video_widget.sync_overlay_playback(is_playing, ms)
+        self._sync_mp4_audio_preview(is_playing, ms)
 
     def _toggle_preview_mute(self) -> None:
-        muted = not self._audio_output.isMuted()
-        self._audio_output.setMuted(muted)
-        self._video_widget.set_overlay_preview_muted(muted)
-        self._mute_preview_btn.setText("Unmute" if muted else "Mute")
+        self._preview_muted = not self._preview_muted
+        self._audio_output.setMuted(self._preview_muted)
+        self._mp4_audio_output.setMuted(self._preview_muted)
+        self._video_widget.set_overlay_preview_muted(self._preview_muted)
+        self._mute_preview_btn.setText("Unmute" if self._preview_muted else "Mute")
+        self._sync_mp4_audio_preview(
+            self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState,
+            self._player.position(),
+        )
         self._refresh_icons()
 
     def _set_in_at_playhead(self) -> None:
@@ -1353,13 +1697,19 @@ class MainWindow(QMainWindow):
         self._timeline.set_position(pos_ms)
         self._update_time_label(pos_ms)
         self._video_widget.set_playhead_sec(pos_ms / 1000.0)
+        is_playing = self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
         if (
             self._loop_check.isChecked()
-            and self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+            and is_playing
             and self._timeline.out_ms() > self._timeline.in_ms()
             and pos_ms >= self._timeline.out_ms()
         ):
-            self._player.setPosition(self._timeline.in_ms())
+            in_ms = self._timeline.in_ms()
+            self._player.setPosition(in_ms)
+            self._sync_mp4_audio_preview(True, in_ms)
+            return
+        if is_playing and self._mp4_audio_info is not None and self._output_format == "mp4":
+            self._sync_mp4_audio_preview(True, pos_ms)
 
     def _on_player_duration_changed(self, duration_ms: int) -> None:
         if duration_ms > 0 and self._video_info is not None and (not self._base_asset or self._base_asset.kind != "image"):
@@ -1379,6 +1729,7 @@ class MainWindow(QMainWindow):
         )
         if not (self._base_asset and self._base_asset.kind == "image"):
             self._video_widget.sync_overlay_playback(is_playing)
+            self._sync_mp4_audio_preview(is_playing, self._player.position())
 
     def _on_media_status_changed(self, status: QMediaPlayer.MediaStatus) -> None:
         if self._video_info is None or (self._base_asset and self._base_asset.kind == "image"):
@@ -1418,12 +1769,17 @@ class MainWindow(QMainWindow):
         self._output_format = fmt
         self._options_stack.setCurrentIndex(0 if fmt == "mp4" else 1)
         self._video_widget.set_meme_mode(fmt == "gif")
+        self._audio_timeline_row.setVisible(fmt == "mp4" and self._mp4_audio_info is not None)
         if fmt == "mp4":
             self._video_widget.set_overlay_crop_mode(False)
             self._meme_panel.set_overlay_crop_checked(False)
         self._update_export_button_label()
         self._refresh_default_output_path()
         self._sync_caption_preview()
+        self._sync_mp4_audio_preview(
+            self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState,
+            self._player.position(),
+        )
 
     def _current_gif_caption(self) -> Optional[GifCaption]:
         caption = GifCaption(
@@ -1511,11 +1867,12 @@ class MainWindow(QMainWindow):
 
         mode, fixed_height = self._mp4_res_combo.currentData()
         effective_height = self._active_crop.height if self._active_crop is not None else self._video_info.height
+        has_overlay = self._mp4_audio_info is not None
         plan = calculate_mp4_encoding_plan(
             duration_sec=clip_sec,
             target_mb=target_mb,
-            has_audio=self._video_info.has_audio,
-            mute_audio=self._mute_export_check.isChecked(),
+            has_audio=self._video_info.has_audio or has_overlay,
+            mute_audio=self._mute_export_check.isChecked() and not has_overlay,
             source_height=effective_height,
             max_height=fixed_height,
             auto_scale=(mode == "auto"),
@@ -1542,11 +1899,13 @@ class MainWindow(QMainWindow):
             out_path = out_path.with_suffix(expected_ext)
             self._output_edit.setText(str(out_path))
 
-        if out_path.resolve() == self._video_info.path.resolve():
+        if out_path.resolve() == self._video_info.path.resolve() or (
+            self._mp4_audio_info is not None and out_path.resolve() == self._mp4_audio_info.path.resolve()
+        ):
             QMessageBox.warning(
                 self,
                 "Invalid Output Path",
-                "Output file cannot overwrite the source file. Pick a different filename.",
+                "Output file cannot overwrite a source file. Pick a different filename.",
             )
             return
 
@@ -1609,6 +1968,7 @@ class MainWindow(QMainWindow):
                 max_height=fixed_height,
                 auto_scale_for_target=(mode == "auto"),
                 mute_audio=self._mute_export_check.isChecked(),
+                audio_overlay=self._current_mp4_audio_overlay() if self._output_format == "mp4" else None,
                 gif_fps=int(self._gif_fps_combo.currentData()),
                 gif_max_width=self._gif_width_combo.currentData(),
                 gif_target_size_mb=self._gif_limit_combo.currentData(),
@@ -1617,6 +1977,7 @@ class MainWindow(QMainWindow):
 
         self._stop_still_playback()
         self._player.pause()
+        self._mp4_audio_player.pause()
         self._video_widget.sync_overlay_playback(False)
         self._result_widget.setVisible(False)
         self._progress_bar.setValue(0)
@@ -1753,6 +2114,9 @@ class MainWindow(QMainWindow):
             self._worker.wait(3000)
         self._video_widget.clear_meme_caches()
         self._yt_drawer.shutdown()
+        self._mp4_audio_player.stop()
+        self._mp4_audio_player.setSource(QUrl())
+        self._mp4_audio_player.setAudioOutput(None)
         self._player.stop()
         self._player.setSource(QUrl())
         self._player.setVideoOutput(None)

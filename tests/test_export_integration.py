@@ -14,7 +14,7 @@ from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication
 
 from videdit.exporter import ExportOptions, execute_export
-from videdit.ffmpeg_tools import CropRect, GifCaption, find_ffmpeg_binaries, probe_video
+from videdit.ffmpeg_tools import AudioOverlay, CropRect, GifCaption, find_ffmpeg_binaries, probe_audio, probe_video
 from videdit.meme_project import (
     BaseLayer,
     MediaOverlayLayer,
@@ -511,3 +511,106 @@ def test_integration_gif_base_with_cropped_circle_chromakey_overlay(tmp_path: Pa
     assert ring_pt.blue() > 150 and ring_pt.green() < 90
 
     app.processEvents()
+
+
+def test_integration_mp4_audio_overlay_mix_replace_and_silent_video(
+    sample_video: Path, tmp_path: Path
+) -> None:
+    ffmpeg_path, _ = find_ffmpeg_binaries()
+    if not ffmpeg_path:
+        pytest.skip("ffmpeg not available")
+
+    # Generate a 1.2s WAV sound effect and a 3.0s silent MP4 clip.
+    sfx_wav = tmp_path / "sfx.wav"
+    subprocess.run(
+        [
+            ffmpeg_path,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=880:sample_rate=44100:duration=1.2",
+            str(sfx_wav),
+        ],
+        capture_output=True,
+        check=True,
+    )
+    sfx_info = probe_audio(sfx_wav)
+    assert sfx_info.duration_sec == pytest.approx(1.2, abs=0.1)
+
+    silent_mp4 = tmp_path / "silent.mp4"
+    subprocess.run(
+        [
+            ffmpeg_path,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=640x360:rate=30:duration=3",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            str(silent_mp4),
+        ],
+        capture_output=True,
+        check=True,
+    )
+    silent_info = probe_video(silent_mp4)
+    assert silent_info.has_audio is False
+
+    # 1. Silent video + looped audio overlay -> 2-pass target size 1.0 MB produces MP4 with audio.
+    out_from_silent = tmp_path / "silent_with_audio.mp4"
+    execute_export(
+        ExportOptions(
+            input_path=silent_mp4,
+            output_path=out_from_silent,
+            start_sec=0.0,
+            end_sec=2.5,
+            output_format="mp4",
+            video_info=silent_info,
+            target_size_mb=1.0,
+            audio_overlay=AudioOverlay(
+                path=sfx_wav,
+                mode="replace",
+                overlay_volume=1.2,
+                video_offset_sec=0.4,
+                audio_start_sec=0.2,
+                audio_end_sec=0.9,
+                loop=True,
+            ),
+        )
+    )
+    assert out_from_silent.exists()
+    assert out_from_silent.stat().st_size <= 1_000_000
+    res_silent_info = probe_video(out_from_silent)
+    assert res_silent_info.has_audio is True
+    assert res_silent_info.duration_sec == pytest.approx(2.5, abs=0.25)
+
+    # 2. Video with audio + mixed audio overlay -> CRF 20 MP4 retains audio and duration.
+    vid_info = probe_video(sample_video)
+    out_mixed = tmp_path / "mixed.mp4"
+    execute_export(
+        ExportOptions(
+            input_path=sample_video,
+            output_path=out_mixed,
+            start_sec=1.0,
+            end_sec=3.0,
+            output_format="mp4",
+            video_info=vid_info,
+            audio_overlay=AudioOverlay(
+                path=sfx_wav,
+                mode="mix",
+                overlay_volume=0.8,
+                video_offset_sec=0.3,
+                audio_start_sec=0.2,
+                loop=False,
+            ),
+        )
+    )
+    assert out_mixed.exists()
+    mixed_info = probe_video(out_mixed)
+    assert mixed_info.has_audio is True
+    assert mixed_info.duration_sec == pytest.approx(2.0, abs=0.25)

@@ -628,3 +628,99 @@ def test_meme_studio_multi_file_layers_and_mode_toggle(
     win._video_widget.clear_meme_caches()
     win._select_format_pill("mp4")
     qt_app.processEvents()
+
+
+def test_mp4_audio_overlay_ui_controls(
+    qt_app: QApplication, main_window: MainWindow, tmp_path: Path
+) -> None:
+    ffmpeg_path, _ = find_ffmpeg_binaries()
+    if not ffmpeg_path:
+        pytest.skip("ffmpeg not available")
+
+    clip = tmp_path / "silent_clip.mp4"
+    subprocess.run(
+        [
+            ffmpeg_path,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x180:rate=30:duration=2",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            str(clip),
+        ],
+        capture_output=True,
+        check=True,
+    )
+    wav = tmp_path / "track.wav"
+    subprocess.run(
+        [
+            ffmpeg_path,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=44100:duration=1.5",
+            str(wav),
+        ],
+        capture_output=True,
+        check=True,
+    )
+
+    win = main_window
+    win.load_video(clip)
+    win._select_mp4_preset("10")
+    qt_app.processEvents()
+
+    assert win._current_mp4_audio_overlay() is None
+    assert "no audio" in win._mp4_estimate_label.text()
+
+    win.load_mp4_audio_overlay(wav)
+    qt_app.processEvents()
+
+    assert not win._mp4_audio_opts_box.isHidden()
+    assert not win._mp4_audio_clear_btn.isHidden()
+    assert not win._audio_timeline_row.isHidden()
+    assert "track.wav" in win._mp4_audio_label.text()
+    # Silent source video with audio overlay now reserves audio bitrate in 2-pass plan.
+    assert "audio" in win._mp4_estimate_label.text()
+    assert "no audio" not in win._mp4_estimate_label.text()
+
+    win._mp4_audio_vol_slider.setValue(140)
+    win._mp4_audio_offset_spin.setValue(0.5)
+    win._audio_timeline.set_trim_points(200, 1100, emit=True)
+    win._mp4_audio_loop_check.setChecked(True)
+    overlay = win._current_mp4_audio_overlay()
+    assert overlay is not None
+    assert overlay.overlay_volume == pytest.approx(1.4)
+    assert overlay.video_offset_sec == pytest.approx(0.5)
+    assert overlay.audio_start_sec == pytest.approx(0.2)
+    assert overlay.audio_end_sec == pytest.approx(1.1)
+    assert overlay.loop is True
+
+    # Switching to GIF tab hides audio timeline row; switching back shows it.
+    win._select_format_pill("gif")
+    qt_app.processEvents()
+    assert win._audio_timeline_row.isHidden()
+    win._select_format_pill("mp4")
+    qt_app.processEvents()
+    assert not win._audio_timeline_row.isHidden()
+
+    # Toggling Mute Video Audio mutes original video audio in preview even without overlay.
+    win.clear_mp4_audio_overlay()
+    qt_app.processEvents()
+    assert win._current_mp4_audio_overlay() is None
+    assert win._mp4_audio_opts_box.isHidden()
+    assert win._audio_timeline_row.isHidden()
+
+    win._mute_export_check.setChecked(True)
+    qt_app.processEvents()
+    assert win._audio_output.isMuted() is True
+    win._mute_export_check.setChecked(False)
+    qt_app.processEvents()
+    assert win._audio_output.isMuted() is False
