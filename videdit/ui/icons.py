@@ -120,6 +120,32 @@ def make_monoline_icon(name: str, color: str, size: int = 16) -> QIcon:
         # Minimal clipboard outline
         p.drawRect(QRectF(m + 1.0, m + 2.0, s - 2 * m - 2.0, s - 2 * m - 2.0))
         p.drawRect(QRectF(mid - 2.0, m, 4.0, 2.0))
+    elif name == "image":
+        p.drawRect(QRectF(m, m + 1.0, s - 2 * m, s - 2 * m - 2.0))
+        p.drawEllipse(QPointF(m + 3.0, m + 4.0), 1.0, 1.0)
+        p.drawPolyline(
+            QPolygonF([QPointF(m + 1.0, s - m - 2.0), QPointF(mid - 1.0, mid), QPointF(mid + 1.5, s - m - 3.5), QPointF(s - m - 1.0, mid - 1.0)])
+        )
+    elif name == "text":
+        p.drawLine(QPointF(m + 1.0, m + 1.5), QPointF(s - m - 1.0, m + 1.5))
+        p.drawLine(QPointF(mid, m + 1.5), QPointF(mid, s - m - 1.0))
+        p.drawLine(QPointF(mid - 2.5, s - m - 1.0), QPointF(mid + 2.5, s - m - 1.0))
+    elif name == "circle_mask":
+        p.drawEllipse(QPointF(mid, mid), mid - m, mid - m)
+    elif name == "flip_h":
+        p.drawLine(QPointF(mid, m), QPointF(mid, s - m))
+        p.drawPolygon(QPolygonF([QPointF(m, mid), QPointF(mid - 2.0, m + 2.0), QPointF(mid - 2.0, s - m - 2.0)]))
+        p.drawPolygon(QPolygonF([QPointF(s - m, mid), QPointF(mid + 2.0, m + 2.0), QPointF(mid + 2.0, s - m - 2.0)]))
+    elif name == "trash":
+        p.drawLine(QPointF(m, m + 2.5), QPointF(s - m, m + 2.5))
+        p.drawRect(QRectF(mid - 2.0, m, 4.0, 2.5))
+        p.drawRect(QRectF(m + 1.5, m + 2.5, s - 2 * m - 3.0, s - 2 * m - 2.5))
+    elif name == "arrow_up":
+        p.drawLine(QPointF(mid, s - m - 1.0), QPointF(mid, m + 1.0))
+        p.drawPolyline(QPolygonF([QPointF(mid - 3.5, m + 4.5), QPointF(mid, m + 1.0), QPointF(mid + 3.5, m + 4.5)]))
+    elif name == "arrow_down":
+        p.drawLine(QPointF(mid, m + 1.0), QPointF(mid, s - m - 1.0))
+        p.drawPolyline(QPolygonF([QPointF(mid - 3.5, s - m - 4.5), QPointF(mid, s - m - 1.0), QPointF(mid + 3.5, s - m - 4.5)]))
 
     p.end()
     return QIcon(pixmap)

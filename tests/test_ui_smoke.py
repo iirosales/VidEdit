@@ -11,7 +11,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QEventLoop, QPointF, QSettings, QTimer, Qt
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtGui import QColor, QImage, QMouseEvent
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import QApplication, QFileDialog, QWidget
 
@@ -568,3 +568,63 @@ def test_gif_meme_captions_ui_and_live_preview(
     win._gif_caption_caps_check.setChecked(True)
     qt_app.processEvents()
     assert win._video_widget.caption_preview() is None
+
+
+def test_meme_studio_multi_file_layers_and_mode_toggle(
+    qt_app: QApplication, main_window: MainWindow, tmp_path: Path
+) -> None:
+    meme_path = tmp_path / "template.png"
+    meme_img = QImage(640, 480, QImage.Format.Format_RGBA8888)
+    meme_img.fill(QColor("#1B54B8"))
+    assert meme_img.save(str(meme_path), "PNG")
+
+    face_path = tmp_path / "friend.png"
+    face_img = QImage(200, 200, QImage.Format.Format_RGBA8888)
+    face_img.fill(QColor("#E0284A"))
+    assert face_img.save(str(face_path), "PNG")
+
+    win = main_window
+    win.load_media_files([meme_path, face_path])
+    qt_app.processEvents()
+
+    # Auto-enters Meme Studio (GIF Animation tab) with PNG output for still images.
+    assert win._output_format == "gif"
+    assert win._video_widget.is_meme_mode() is True
+    assert win._meme_panel.export_format() == "png"
+    assert win._output_edit.text().endswith(".png")
+    assert len(win._meme_layers) == 1
+    assert win._selected_layer_id == win._meme_layers[0].id
+
+    # Toggle Circle mask, Overlay Crop, Top White Bar, and add a draggable Text Box.
+    win._meme_panel._shape_buttons["circle"].click()
+    win._meme_panel._ov_crop_btn.setChecked(True)
+    assert win._video_widget.is_overlay_crop_mode() is True
+    win._meme_panel._ov_crop_btn.setChecked(False)
+    win._meme_panel._top_bar_edit.setText("Top Meme Header")
+    win.add_text_overlay()
+    qt_app.processEvents()
+    assert len(win._meme_layers) == 2
+
+    win._video_widget.resize(640, 480)
+    win._video_widget.repaint()
+
+    # Switching to MP4 Video tab disables Meme Studio canvas mode; switching back re-enables it.
+    win._select_format_pill("mp4")
+    qt_app.processEvents()
+    assert win._video_widget.is_meme_mode() is False
+
+    win._select_format_pill("gif")
+    qt_app.processEvents()
+    assert win._video_widget.is_meme_mode() is True
+
+    # Delete selected text layer
+    win._meme_panel._layer_del_btn.click()
+    qt_app.processEvents()
+    assert len(win._meme_layers) == 1
+
+    # Clean up state
+    win._meme_panel._top_bar_edit.clear()
+    win._meme_layers.clear()
+    win._video_widget.clear_meme_caches()
+    win._select_format_pill("mp4")
+    qt_app.processEvents()

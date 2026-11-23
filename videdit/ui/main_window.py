@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import os
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from typing import Literal, Optional
 
-from PySide6.QtCore import QSettings, QStandardPaths, Qt, QUrl
-from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QKeySequence, QMouseEvent, QShortcut
+from PySide6.QtCore import QSettings, QStandardPaths, QTimer, Qt, QUrl
+from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QImage, QImageReader, QKeySequence, QMouseEvent, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication,
@@ -36,15 +37,28 @@ from PySide6.QtWidgets import (
 
 from videdit.exporter import ExportOptions, ExportWorker
 from videdit.ffmpeg_tools import CropRect, GifCaption, VideoInfo, calculate_mp4_encoding_plan, probe_video
+from videdit.meme_project import (
+    ALL_MEDIA_EXTENSIONS,
+    BaseLayer,
+    MediaAssetInfo,
+    MediaOverlayLayer,
+    MemeComposition,
+    OverlayLayer,
+    build_media_overlay_layer,
+    build_text_overlay_layer,
+    classify_media_path,
+    probe_media_asset,
+)
 from videdit.ui.chrome import CommandEntry, CommandPalette, DropStageWidget, TitleBar
 from videdit.ui.icons import ClockworkSpinner, make_monoline_icon
+from videdit.ui.meme_panel import MemeExportFormat, MemePanel
 from videdit.ui.theme import ThemeName, ThemeTokens, build_stylesheet, get_theme
 from videdit.ui.timeline import TrimTimelineWidget
 from videdit.ui.video_preview import VideoPreviewWidget
 from videdit.ui.youtube_drawer import YouTubeDrawerWidget
 from videdit.win_taskbar import apply_window_taskbar_metadata
 
-SUPPORTED_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".gif"}
+SUPPORTED_EXTENSIONS = set(ALL_MEDIA_EXTENSIONS)
 _RESIZE_MARGIN = 6
 _DEFAULT_OPEN_DIR_KEY = "paths/default_open_dir"
 
@@ -117,6 +131,10 @@ class MainWindow(QMainWindow):
         self._theme: ThemeTokens = get_theme(theme_key)
 
         self._video_info: Optional[VideoInfo] = None
+        self._base_asset: Optional[MediaAssetInfo] = None
+        self._meme_layers: list[OverlayLayer] = []
+        self._selected_layer_id: Optional[str] = None
+        self._top_bar_text: str = ""
         self._active_crop: Optional[CropRect] = None
         self._duration_ms: int = 0
         self._output_format: Literal["mp4", "gif"] = "mp4"
@@ -125,6 +143,12 @@ class MainWindow(QMainWindow):
         self._last_exported_path: Optional[Path] = None
         self._taskbar_props_applied: bool = False
         self._yt_drawer_added_width: int = 0
+
+        self._still_playing: bool = False
+        self._still_pos_ms: int = 0
+        self._still_timer = QTimer(self)
+        self._still_timer.setInterval(33)
+        self._still_timer.timeout.connect(self._on_still_timer_tick)
 
         self._player = QMediaPlayer(self)
         self._audio_output = QAudioOutput(self)
@@ -167,7 +191,7 @@ class MainWindow(QMainWindow):
         header.setSpacing(10)
         self._open_btn = QPushButton("Open Video...")
         self._default_folder_btn = QPushButton("Default Folder...")
-        self._file_label = QLabel("Drop a video file here or click Open Video...")
+        self._file_label = QLabel("Drop videos or meme images here...")
         self._file_label.setObjectName("MutedLabel")
         self._meta_badge = QLabel("NO SOURCE")
         self._meta_badge.setObjectName("BadgeLabel")
@@ -187,13 +211,13 @@ class MainWindow(QMainWindow):
         self._drop_stage = DropStageWidget()
         drop_layout = QVBoxLayout(self._drop_stage)
         drop_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        drop_title = QLabel("DRAG & DROP VIDEO")
+        drop_title = QLabel("DRAG & DROP VIDEO OR MEME")
         drop_title.setObjectName("DropTitle")
         drop_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        drop_sub = QLabel("MP4 · MOV · MKV · WebM · AVI · GIF")
+        drop_sub = QLabel("MP4 · MOV · MKV · GIF · PNG · JPG · WebP  (drop multiple to layer)")
         drop_sub.setObjectName("MutedLabel")
         drop_sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._drop_open_btn = QPushButton("Select Clip")
+        self._drop_open_btn = QPushButton("Select Clip or Image")
         self._drop_open_btn.setProperty("primary", True)
         drop_layout.addWidget(drop_title)
         drop_layout.addWidget(drop_sub)
@@ -498,98 +522,15 @@ class MainWindow(QMainWindow):
         return panel
 
     def _build_gif_panel(self) -> QWidget:
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 4, 0, 0)
-        layout.setSpacing(8)
-
-        rate_width_box = QWidget()
-        rate_width_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        rate_width_grid = QGridLayout(rate_width_box)
-        rate_width_grid.setContentsMargins(0, 0, 0, 0)
-        rate_width_grid.setHorizontalSpacing(8)
-        rate_width_grid.setVerticalSpacing(4)
-
-        fps_lbl = QLabel("Frame Rate")
-        fps_lbl.setObjectName("MutedLabel")
-        rate_width_grid.addWidget(fps_lbl, 0, 0)
-
-        width_lbl = QLabel("Max Width")
-        width_lbl.setObjectName("MutedLabel")
-        rate_width_grid.addWidget(width_lbl, 0, 1)
-
-        self._gif_fps_combo = QComboBox()
-        self._gif_fps_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self._gif_fps_combo.setMinimumContentsLength(8)
-        self._gif_fps_combo.setMinimumHeight(30)
-        for fps in (10, 15, 20, 24, 30):
-            label = f"{fps} fps (Rec.)" if fps == 15 else f"{fps} fps"
-            self._gif_fps_combo.addItem(label, fps)
-        self._gif_fps_combo.setCurrentIndex(1)
-        rate_width_grid.addWidget(self._gif_fps_combo, 1, 0)
-
-        self._gif_width_combo = QComboBox()
-        self._gif_width_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self._gif_width_combo.setMinimumContentsLength(8)
-        self._gif_width_combo.setMinimumHeight(30)
-        self._gif_width_combo.addItem("Original", None)
-        self._gif_width_combo.addItem("720 px", 720)
-        self._gif_width_combo.addItem("480 px (Rec.)", 480)
-        self._gif_width_combo.addItem("360 px", 360)
-        self._gif_width_combo.addItem("240 px", 240)
-        self._gif_width_combo.setCurrentIndex(2)
-        rate_width_grid.addWidget(self._gif_width_combo, 1, 1)
-
-        rate_width_grid.setColumnStretch(0, 1)
-        rate_width_grid.setColumnStretch(1, 1)
-        layout.addWidget(rate_width_box)
-
-        limit_lbl = QLabel("Auto-Fit Size Limit (Optional)")
-        limit_lbl.setObjectName("MutedLabel")
-        layout.addWidget(limit_lbl)
-
-        self._gif_limit_combo = QComboBox()
-        self._gif_limit_combo.addItem("No Size Limit", None)
-        self._gif_limit_combo.addItem("10 MB Max (Discord)", 10.0)
-        self._gif_limit_combo.addItem("15 MB Max", 15.0)
-        self._gif_limit_combo.addItem("20 MB Max", 20.0)
-        layout.addWidget(self._gif_limit_combo)
-
-        caption_lbl = QLabel("Meme Captions (Impact)")
-        caption_lbl.setObjectName("MutedLabel")
-        layout.addWidget(caption_lbl)
-
-        self._gif_top_caption_edit = QLineEdit()
-        self._gif_top_caption_edit.setPlaceholderText("Top text (optional)")
-        self._gif_top_caption_edit.setClearButtonEnabled(True)
-        layout.addWidget(self._gif_top_caption_edit)
-
-        self._gif_bottom_caption_edit = QLineEdit()
-        self._gif_bottom_caption_edit.setPlaceholderText("Bottom text (optional)")
-        self._gif_bottom_caption_edit.setClearButtonEnabled(True)
-        layout.addWidget(self._gif_bottom_caption_edit)
-
-        caption_opts_row = QHBoxLayout()
-        caption_opts_row.setSpacing(8)
-        self._gif_caption_size_combo = QComboBox()
-        self._gif_caption_size_combo.addItem("Size: Small", 0.78)
-        self._gif_caption_size_combo.addItem("Size: Medium", 1.0)
-        self._gif_caption_size_combo.addItem("Size: Large", 1.28)
-        self._gif_caption_size_combo.setCurrentIndex(1)
-        caption_opts_row.addWidget(self._gif_caption_size_combo, stretch=1)
-
-        self._gif_caption_caps_check = QCheckBox("ALL CAPS")
-        self._gif_caption_caps_check.setChecked(True)
-        caption_opts_row.addWidget(self._gif_caption_caps_check)
-        layout.addLayout(caption_opts_row)
-
-        gif_note = QLabel("Uses 2-pass palette optimization for sharper colors and smaller GIFs.")
-        gif_note.setObjectName("MutedLabel")
-        gif_note.setWordWrap(True)
-        gif_note.setMinimumHeight(34)
-        layout.addWidget(gif_note)
-
-        return panel
+        self._meme_panel = MemePanel()
+        self._gif_fps_combo = self._meme_panel.gif_fps_combo
+        self._gif_width_combo = self._meme_panel.gif_width_combo
+        self._gif_limit_combo = self._meme_panel.gif_limit_combo
+        self._gif_top_caption_edit = self._meme_panel.gif_top_caption_edit
+        self._gif_bottom_caption_edit = self._meme_panel.gif_bottom_caption_edit
+        self._gif_caption_size_combo = self._meme_panel.gif_caption_size_combo
+        self._gif_caption_caps_check = self._meme_panel.gif_caption_caps_check
+        return self._meme_panel
 
     def _connect_signals(self) -> None:
         self._title_bar.minimize_requested.connect(self.showMinimized)
@@ -615,6 +556,9 @@ class MainWindow(QMainWindow):
         self._video_widget.clicked.connect(self._toggle_play_pause)
         self._video_widget.crop_changed.connect(self._on_crop_changed)
         self._video_widget.crop_mode_exit_requested.connect(self._exit_crop_mode)
+        self._video_widget.layer_selected.connect(self._on_canvas_layer_selected)
+        self._video_widget.overlay_changed.connect(self._on_layer_updated)
+        self._video_widget.overlay_crop_exit_requested.connect(lambda: self._set_overlay_crop_mode(False))
 
         self._timeline.seek_requested.connect(self._seek_to_ms)
         self._timeline.trim_changed.connect(self._on_trim_changed)
@@ -633,10 +577,17 @@ class MainWindow(QMainWindow):
         self._mp4_res_combo.currentIndexChanged.connect(self._refresh_estimate_and_output)
         self._mute_export_check.toggled.connect(self._refresh_estimate_and_output)
 
-        self._gif_top_caption_edit.textChanged.connect(self._sync_caption_preview)
-        self._gif_bottom_caption_edit.textChanged.connect(self._sync_caption_preview)
-        self._gif_caption_size_combo.currentIndexChanged.connect(self._sync_caption_preview)
-        self._gif_caption_caps_check.toggled.connect(self._sync_caption_preview)
+        self._meme_panel.add_media_requested.connect(self._choose_overlay_files)
+        self._meme_panel.add_text_requested.connect(self.add_text_overlay)
+        self._meme_panel.layer_selected.connect(self._on_panel_layer_selected)
+        self._meme_panel.layer_updated.connect(self._on_layer_updated)
+        self._meme_panel.layer_reordered.connect(self._on_layer_reordered)
+        self._meme_panel.layer_deleted.connect(self._on_layer_deleted)
+        self._meme_panel.overlay_crop_toggled.connect(self._set_overlay_crop_mode)
+        self._meme_panel.top_bar_changed.connect(self._on_top_bar_changed)
+        self._meme_panel.classic_caption_changed.connect(self._sync_caption_preview)
+        self._meme_panel.meme_format_changed.connect(self._on_meme_export_format_changed)
+        self._meme_panel.settings_changed.connect(self._on_meme_settings_changed)
 
         self._browse_btn.clicked.connect(self._choose_output_file)
         self._output_edit.textEdited.connect(self._on_output_edited)
@@ -658,7 +609,8 @@ class MainWindow(QMainWindow):
         self._bind_shortcut("I", self._set_in_at_playhead)
         self._bind_shortcut("O", self._set_out_at_playhead)
         self._bind_shortcut("C", self._toggle_crop_mode)
-        self._bind_shortcut("Escape", self._exit_crop_mode)
+        self._bind_shortcut("Escape", self._handle_escape)
+        self._bind_shortcut("Delete", self._delete_selected_layer_shortcut)
         self._bind_shortcut("Left", lambda: self._step_by_ms(-100))
         self._bind_shortcut("Right", lambda: self._step_by_ms(100))
         self._bind_shortcut("Shift+Left", lambda: self._step_by_ms(-1000))
@@ -694,6 +646,7 @@ class MainWindow(QMainWindow):
         self._timeline.apply_theme(self._theme)
         self._drop_stage.apply_theme(self._theme)
         self._video_widget.apply_theme(self._theme)
+        self._meme_panel.apply_theme(self._theme)
         self._yt_drawer.apply_theme(self._theme)
         self._dial_spinner.set_colors(self._theme.color_secondary, self._theme.accent_cobalt)
         self._theme_toggle_btn.setText(f"Theme: {self._theme.display_name}")
@@ -711,7 +664,10 @@ class MainWindow(QMainWindow):
         self._step_fwd_btn.setIcon(make_monoline_icon("step_fwd", c))
         crop_icon_color = self._theme.color_primary_text if self._crop_btn.isChecked() else c
         self._crop_btn.setIcon(make_monoline_icon("crop", crop_icon_color))
-        is_playing = self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        is_playing = (
+            self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+            or self._still_playing
+        )
         self._play_btn.setIcon(make_monoline_icon("pause" if is_playing else "play", c))
         is_muted = self._audio_output.isMuted()
         self._mute_preview_btn.setIcon(make_monoline_icon("muted" if is_muted else "volume", c))
@@ -721,9 +677,11 @@ class MainWindow(QMainWindow):
     def build_command_entries(self) -> list[CommandEntry]:
         """Return commands exposed in the Ctrl+K Command Palette."""
         return [
-            CommandEntry("Open Video File...", "Click", self._choose_input_file),
+            CommandEntry("Open Video or Image...", "Click", self._choose_input_file),
             CommandEntry("Set Default Open Folder...", "", self._choose_default_open_folder),
             CommandEntry("Reset Default Open Folder", "", self._reset_default_open_folder),
+            CommandEntry("Add Overlay Image / Video...", "", self._choose_overlay_files),
+            CommandEntry("Add Meme Text Box", "", self.add_text_overlay),
             CommandEntry("Play / Pause Preview", "Space", self._toggle_play_pause),
             CommandEntry("Set In Point at Playhead", "I", self._set_in_at_playhead),
             CommandEntry("Set Out Point at Playhead", "O", self._set_out_at_playhead),
@@ -731,12 +689,12 @@ class MainWindow(QMainWindow):
             CommandEntry("Toggle Video Crop Mode", "C", self._toggle_crop_mode),
             CommandEntry("Clear Video Crop", "", self._clear_crop),
             CommandEntry("Format: MP4 Video", "", lambda: self._select_format_pill("mp4")),
-            CommandEntry("Format: GIF Animation", "", lambda: self._select_format_pill("gif")),
+            CommandEntry("Format: GIF / Meme Studio", "", lambda: self._select_format_pill("gif")),
             CommandEntry("MP4 Preset: Original Quality", "", lambda: self._select_mp4_preset("original")),
             CommandEntry("MP4 Preset: 10 MB (Discord)", "", lambda: self._select_mp4_preset("10")),
             CommandEntry("MP4 Preset: 15 MB", "", lambda: self._select_mp4_preset("15")),
             CommandEntry("MP4 Preset: 20 MB", "", lambda: self._select_mp4_preset("20")),
-            CommandEntry("Export Current Clip", "", self._start_export),
+            CommandEntry("Export Current Clip / Meme", "", self._start_export),
             CommandEntry("Toggle YouTube MP4 Downloader", "Ctrl+Y", self.toggle_youtube_drawer),
             CommandEntry("Toggle Light / Dark Theme", "", self.toggle_theme),
         ]
@@ -800,13 +758,17 @@ class MainWindow(QMainWindow):
         event.ignore()
 
     def dropEvent(self, event: QDropEvent) -> None:
+        paths: list[Path] = []
         for url in event.mimeData().urls():
             if url.isLocalFile():
-                path = Path(url.toLocalFile())
-                if path.suffix.lower() in SUPPORTED_EXTENSIONS:
-                    self.load_video(path)
-                    event.acceptProposedAction()
-                    return
+                p = Path(url.toLocalFile())
+                if p.suffix.lower() in SUPPORTED_EXTENSIONS:
+                    paths.append(p)
+        if not paths:
+            return
+        event.acceptProposedAction()
+        as_overlays = self._output_format == "gif" and self._base_asset is not None
+        self.load_media_files(paths, add_as_overlays=as_overlays)
 
     def default_open_dir(self) -> Path:
         """Return the configured default folder for Open Video, or the OS fallback."""
@@ -837,7 +799,7 @@ class MainWindow(QMainWindow):
         self._default_folder_btn.setToolTip(
             f"Default Open Video folder: {folder}\nClick to change."
         )
-        self._open_btn.setToolTip(f"Open a video from {folder}")
+        self._open_btn.setToolTip(f"Open a video or image from {folder}")
 
     def _choose_default_open_folder(self) -> None:
         folder_str = QFileDialog.getExistingDirectory(
@@ -856,34 +818,167 @@ class MainWindow(QMainWindow):
     def _choose_input_file(self) -> None:
         path_str, _ = QFileDialog.getOpenFileName(
             self,
-            "Open Video",
+            "Open Video or Image",
             str(self.default_open_dir()),
-            "Video Files (*.mp4 *.mov *.mkv *.webm *.avi *.m4v *.gif);;All Files (*)",
+            "Media Files (*.mp4 *.mov *.mkv *.webm *.avi *.m4v *.gif *.png *.jpg *.jpeg *.webp *.bmp);;All Files (*)",
         )
         if path_str:
-            self.load_video(Path(path_str))
+            self.load_media_files([Path(path_str)], add_as_overlays=False)
 
-    def load_video(self, path: Path) -> None:
-        """Probe and load a video file into the preview player and timeline."""
+    def _choose_overlay_files(self) -> None:
+        if self._base_asset is None:
+            self._choose_input_file()
+            return
+        paths_str, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Add Overlay Image(s) or Video(s)",
+            str(self.default_open_dir()),
+            "Media Files (*.png *.jpg *.jpeg *.webp *.bmp *.gif *.mp4 *.mov *.mkv *.webm *.avi *.m4v);;All Files (*)",
+        )
+        if paths_str:
+            self.add_overlay_files([Path(p) for p in paths_str])
+
+    def load_media_files(self, paths: list[Path], add_as_overlays: bool = False) -> None:
+        """Load one or more image/GIF/video files into the editor or Meme Studio."""
+        valid = [p for p in paths if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS]
+        if not valid:
+            return
         if self._worker is not None and self._worker.isRunning():
             QMessageBox.information(self, "Export Running", "Wait for or cancel the active export first.")
             return
 
-        self._player.stop()
-        try:
-            info = probe_video(path)
-        except Exception as exc:
-            QMessageBox.critical(self, "Could Not Open Video", str(exc))
+        if add_as_overlays and self._base_asset is not None:
+            self._select_format_pill("gif")
+            self.add_overlay_files(valid)
             return
 
-        self._video_info = info
+        if len(valid) == 1 and classify_media_path(valid[0]) != "image":
+            self.load_video(valid[0])
+            return
+
+        # Pick first video/gif if mixed with images, otherwise first image as Base.
+        base_idx = next((i for i, p in enumerate(valid) if classify_media_path(p) != "image"), 0)
+        base_path = valid[base_idx]
+        overlay_paths = [p for i, p in enumerate(valid) if i != base_idx]
+
+        if classify_media_path(base_path) == "image":
+            self.load_image(base_path)
+        else:
+            self.load_video(base_path)
+
+        self._select_format_pill("gif")
+        if overlay_paths:
+            self.add_overlay_files(overlay_paths)
+
+    def load_image(self, path: Path) -> None:
+        """Load a static image (PNG, JPG, WebP, BMP) as the base canvas."""
+        if self._worker is not None and self._worker.isRunning():
+            QMessageBox.information(self, "Export Running", "Wait for or cancel the active export first.")
+            return
+
+        self._stop_still_playback()
+        self._player.stop()
+        self._player.setSource(QUrl())
+
+        try:
+            asset = probe_media_asset(path)
+            reader = QImageReader(str(path))
+            reader.setAutoTransform(True)
+            img = reader.read()
+            if img.isNull():
+                img = QImage(str(path))
+            if img.isNull():
+                raise ValueError(f"Could not decode image: {path.name}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Could Not Open Image", str(exc))
+            return
+
+        self._base_asset = asset
+        self._video_info = VideoInfo(
+            path=path,
+            duration_sec=0.0,
+            width=img.width(),
+            height=img.height(),
+            fps=30.0,
+            has_audio=False,
+            file_size_bytes=asset.file_size_bytes,
+            video_codec="image",
+        )
+        self._meme_layers.clear()
+        self._selected_layer_id = None
+        self._video_widget.clear_meme_caches()
         self._active_crop = None
-        self._duration_ms = max(200, int(round(info.duration_sec * 1000)))
+        self._duration_ms = 0
         self._output_customized = False
         self._result_widget.setVisible(False)
         self._status_label.setText("")
         self._crop_btn.setChecked(False)
         self._video_widget.set_crop_mode(False)
+        self._video_widget.set_source_size(img.width(), img.height())
+        self._video_widget.set_base_image(img)
+        self._on_crop_changed(None)
+
+        self._file_label.setText(path.name)
+        self._file_label.setToolTip(str(path))
+        self._title_bar.set_document_title(path.name)
+        size_str = format_file_size(asset.file_size_bytes)
+        meta_text = f"{img.width()}×{img.height()} · IMG · {size_str}"
+        self._meta_badge.setText(meta_text)
+        self._telemetry_label.setText(f"LOADED · {meta_text}")
+
+        self._timeline.set_duration(0)
+        self._in_badge.setText("In: 00:00.00")
+        self._out_badge.setText("Out: 00:00.00")
+        self._dur_badge.setText("Still Image")
+        self._update_time_label(0)
+
+        self._video_stack.setCurrentIndex(1)
+        self._update_controls_enabled(True)
+        self._meme_panel.set_export_format("png", emit=False)
+        self._select_format_pill("gif")
+        self._sync_meme_studio_state()
+        self._refresh_default_output_path()
+
+    def load_video(self, path: Path) -> None:
+        """Probe and load a video (or image) file into the preview player and timeline."""
+        if classify_media_path(path) == "image":
+            self.load_image(path)
+            return
+        if self._worker is not None and self._worker.isRunning():
+            QMessageBox.information(self, "Export Running", "Wait for or cancel the active export first.")
+            return
+
+        self._stop_still_playback()
+        self._player.stop()
+        try:
+            info = probe_video(path)
+            asset = MediaAssetInfo(
+                path=path,
+                kind=classify_media_path(path),
+                width=info.width,
+                height=info.height,
+                duration_sec=info.duration_sec if info.duration_sec > 0 else 2.0,
+                fps=info.fps,
+                has_audio=(info.has_audio and classify_media_path(path) == "video"),
+                file_size_bytes=info.file_size_bytes,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Could Not Open Video", str(exc))
+            return
+
+        self._base_asset = asset
+        self._video_info = info
+        self._meme_layers.clear()
+        self._selected_layer_id = None
+        self._video_widget.clear_meme_caches()
+        self._active_crop = None
+        self._duration_ms = max(200, int(round(asset.duration_sec * 1000)))
+        self._output_customized = False
+        self._result_widget.setVisible(False)
+        self._status_label.setText("")
+        self._crop_btn.setChecked(False)
+        self._video_widget.set_crop_mode(False)
+        self._video_widget.set_base_image(None)
         self._video_widget.set_source_size(info.width, info.height)
         self._on_crop_changed(None)
 
@@ -902,30 +997,255 @@ class MainWindow(QMainWindow):
         self._player.setSource(QUrl.fromLocalFile(str(path)))
         self._player.pause()
         self._update_controls_enabled(True)
+        if self._meme_panel.export_format() in ("png", "jpg"):
+            self._meme_panel.set_export_format("gif", emit=False)
+        self._sync_meme_studio_state()
         self._refresh_default_output_path()
         self._refresh_estimate_and_output()
 
-    def _update_controls_enabled(self, enabled: bool) -> None:
-        for widget in (
-            self._play_btn,
-            self._step_back_btn,
-            self._step_fwd_btn,
-            self._set_in_btn,
-            self._set_out_btn,
-            self._reset_trim_btn,
-            self._crop_btn,
-            self._clear_crop_btn,
-            self._export_btn,
-            self._browse_btn,
-            self._output_edit,
+    def add_overlay_files(self, paths: list[Path]) -> None:
+        """Probe and append one or more image/GIF/video files as Meme Studio overlays."""
+        if self._base_asset is None:
+            self.load_media_files(paths, add_as_overlays=False)
+            return
+
+        stage_w, stage_h = self._current_stage_size()
+        added_any = False
+        for p in paths:
+            if not p.is_file() or p.suffix.lower() not in SUPPORTED_EXTENSIONS:
+                continue
+            try:
+                asset = probe_media_asset(p)
+            except Exception as exc:
+                QMessageBox.warning(self, "Could Not Add Overlay", f"{p.name}: {exc}")
+                continue
+            layer = build_media_overlay_layer(
+                asset,
+                stage_w=stage_w,
+                stage_h=stage_h,
+                index_offset=len(self._meme_layers),
+            )
+            self._meme_layers.append(layer)
+            self._selected_layer_id = layer.id
+            added_any = True
+
+        if added_any:
+            self._refresh_still_animation_timeline()
+            self._sync_meme_studio_state()
+            self._refresh_default_output_path()
+
+    def add_text_overlay(self) -> None:
+        """Append a new draggable TextOverlayLayer to the Meme Studio canvas."""
+        if self._base_asset is None:
+            return
+        self._select_format_pill("gif")
+        layer = build_text_overlay_layer(text="MEME TEXT", index_offset=len(self._meme_layers))
+        self._meme_layers.append(layer)
+        self._selected_layer_id = layer.id
+        self._sync_meme_studio_state()
+
+    def _current_stage_size(self) -> tuple[int, int]:
+        if self._active_crop is not None:
+            return self._active_crop.width, self._active_crop.height
+        if self._base_asset is not None:
+            return self._base_asset.width, self._base_asset.height
+        return 1280, 720
+
+    def _build_meme_composition(self) -> Optional[MemeComposition]:
+        if self._base_asset is None:
+            return None
+        start_sec = self._timeline.in_ms() / 1000.0 if self._base_asset.kind != "image" else 0.0
+        end_sec = self._timeline.out_ms() / 1000.0 if self._base_asset.kind != "image" else 0.0
+        base = BaseLayer(
+            path=self._base_asset.path,
+            kind=self._base_asset.kind,
+            width=self._base_asset.width,
+            height=self._base_asset.height,
+            duration_sec=self._base_asset.duration_sec,
+            has_audio=self._base_asset.has_audio,
+            fps=self._base_asset.fps,
+            file_size_bytes=self._base_asset.file_size_bytes,
+            crop=self._active_crop,
+            start_sec=start_sec,
+            end_sec=end_sec,
+            top_bar_text=self._top_bar_text,
+        )
+        return MemeComposition(
+            base=base,
+            overlays=tuple(self._meme_layers),
+            still_duration_sec=self._meme_panel.still_duration_sec(),
+            classic_caption=self._current_gif_caption(),
+        )
+
+    def _sync_meme_studio_state(self) -> None:
+        comp = self._build_meme_composition()
+        is_anim = comp.has_animation() if comp is not None else False
+        base_kind = self._base_asset.kind if self._base_asset is not None else "video"
+        self._video_widget.set_meme_layers(self._meme_layers)
+        self._video_widget.set_selected_layer(self._selected_layer_id)
+        self._video_widget.set_top_bar(self._top_bar_text)
+        self._meme_panel.set_layers(self._meme_layers, self._selected_layer_id, is_anim, base_kind)
+
+        # If a static base just gained a video/GIF overlay, auto-switch from PNG to GIF.
+        if (
+            self._base_asset is not None
+            and self._base_asset.kind == "image"
+            and is_anim
+            and self._meme_panel.export_format() in ("png", "jpg")
         ):
+            self._meme_panel.set_export_format("gif", emit=False)
+            self._refresh_default_output_path()
+
+    def _refresh_still_animation_timeline(self) -> None:
+        if self._base_asset is None or self._base_asset.kind != "image":
+            return
+        comp = self._build_meme_composition()
+        if comp is not None and comp.has_animation():
+            dur_ms = max(500, int(round(comp.effective_duration_sec() * 1000)))
+            self._duration_ms = dur_ms
+            self._timeline.set_duration(dur_ms)
+            self._update_time_label(self._still_pos_ms)
+            self._dur_badge.setText(f"Clip: {dur_ms / 1000.0:.2f}s")
+            self._update_controls_enabled(True)
+        else:
+            self._stop_still_playback()
+            self._duration_ms = 0
+            self._timeline.set_duration(0)
+            self._dur_badge.setText("Still Image")
+            self._update_controls_enabled(True)
+
+    def _on_canvas_layer_selected(self, layer_id: str) -> None:
+        self._selected_layer_id = layer_id or None
+        if not self._selected_layer_id:
+            self._meme_panel.set_overlay_crop_checked(False)
+        self._sync_meme_studio_state()
+
+    def _on_panel_layer_selected(self, layer_id: str) -> None:
+        self._selected_layer_id = layer_id or None
+        self._video_widget.set_overlay_crop_mode(False)
+        self._meme_panel.set_overlay_crop_checked(False)
+        self._sync_meme_studio_state()
+
+    def _on_layer_updated(self, updated_layer: OverlayLayer) -> None:
+        for idx, existing in enumerate(self._meme_layers):
+            if existing.id == updated_layer.id:
+                self._meme_layers[idx] = updated_layer
+                break
+        self._refresh_still_animation_timeline()
+        self._sync_meme_studio_state()
+
+    def _on_layer_reordered(self, layer_id: str, delta: int) -> None:
+        idx = next((i for i, l in enumerate(self._meme_layers) if l.id == layer_id), -1)
+        if idx < 0:
+            return
+        new_idx = max(0, min(len(self._meme_layers) - 1, idx + delta))
+        if new_idx != idx:
+            item = self._meme_layers.pop(idx)
+            self._meme_layers.insert(new_idx, item)
+            self._sync_meme_studio_state()
+
+    def _on_layer_deleted(self, layer_id: str) -> None:
+        self._meme_layers = [l for l in self._meme_layers if l.id != layer_id]
+        if self._selected_layer_id == layer_id:
+            self._selected_layer_id = self._meme_layers[-1].id if self._meme_layers else None
+            self._video_widget.set_overlay_crop_mode(False)
+            self._meme_panel.set_overlay_crop_checked(False)
+        self._refresh_still_animation_timeline()
+        self._sync_meme_studio_state()
+
+    def _delete_selected_layer_shortcut(self) -> None:
+        if self._output_format == "gif" and self._selected_layer_id:
+            self._on_layer_deleted(self._selected_layer_id)
+
+    def _set_overlay_crop_mode(self, enabled: bool) -> None:
+        if enabled and self._crop_btn.isChecked():
+            self._crop_btn.setChecked(False)
+        self._video_widget.set_overlay_crop_mode(enabled)
+        self._meme_panel.set_overlay_crop_checked(self._video_widget.is_overlay_crop_mode())
+
+    def _on_top_bar_changed(self, text: str) -> None:
+        self._top_bar_text = text
+        self._video_widget.set_top_bar(text)
+
+    def _on_meme_export_format_changed(self, fmt: str) -> None:
+        self._update_export_button_label()
+        self._refresh_default_output_path()
+
+    def _on_meme_settings_changed(self) -> None:
+        self._refresh_still_animation_timeline()
+        self._refresh_default_output_path()
+
+    def _handle_escape(self) -> None:
+        if self._video_widget.is_overlay_crop_mode():
+            self._set_overlay_crop_mode(False)
+        else:
+            self._exit_crop_mode()
+
+    def _update_controls_enabled(self, enabled: bool) -> None:
+        is_image_only = (
+            self._base_asset is not None
+            and self._base_asset.kind == "image"
+            and not any(
+                isinstance(l, MediaOverlayLayer) and l.visible and l.kind != "image"
+                for l in self._meme_layers
+            )
+        )
+        can_play = enabled and not is_image_only
+        can_trim = enabled and (self._base_asset is None or self._base_asset.kind != "image")
+
+        for widget in (self._play_btn, self._step_back_btn, self._step_fwd_btn):
+            widget.setEnabled(can_play)
+        for widget in (self._set_in_btn, self._set_out_btn, self._reset_trim_btn):
+            widget.setEnabled(can_trim)
+        for widget in (self._crop_btn, self._clear_crop_btn, self._export_btn, self._browse_btn, self._output_edit):
             widget.setEnabled(enabled)
+
+    def _stop_still_playback(self) -> None:
+        self._still_playing = False
+        self._still_timer.stop()
+        self._still_pos_ms = 0
+
+    def _on_still_timer_tick(self) -> None:
+        if not self._still_playing or self._duration_ms <= 0:
+            return
+        self._still_pos_ms += self._still_timer.interval()
+        if self._still_pos_ms >= self._duration_ms:
+            if self._loop_check.isChecked():
+                self._still_pos_ms = 0
+            else:
+                self._still_pos_ms = self._duration_ms
+                self._still_playing = False
+                self._still_timer.stop()
+                self._video_widget.sync_overlay_playback(False, self._still_pos_ms)
+                self._refresh_icons()
+                self._play_btn.setText("Play")
+        self._timeline.set_position(self._still_pos_ms)
+        self._update_time_label(self._still_pos_ms)
+        self._video_widget.set_playhead_sec(self._still_pos_ms / 1000.0)
 
     def _toggle_play_pause(self) -> None:
         if self._video_info is None:
             return
+        if self._base_asset is not None and self._base_asset.kind == "image":
+            if self._duration_ms <= 0:
+                return
+            self._still_playing = not self._still_playing
+            if self._still_playing:
+                if self._still_pos_ms >= self._duration_ms:
+                    self._still_pos_ms = 0
+                self._still_timer.start()
+                self._play_btn.setText("Pause")
+                self._video_widget.sync_overlay_playback(True, self._still_pos_ms)
+            else:
+                self._still_timer.stop()
+                self._play_btn.setText("Play")
+                self._video_widget.sync_overlay_playback(False, self._still_pos_ms)
+            self._refresh_icons()
+            return
+
         if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self._player.pause()
+            self._video_widget.sync_overlay_playback(False, self._player.position())
         else:
             pos = self._player.position()
             in_ms = self._timeline.in_ms()
@@ -933,42 +1253,59 @@ class MainWindow(QMainWindow):
             near_end = out_ms > in_ms and pos >= max(in_ms, out_ms - 60)
             if pos < in_ms or near_end:
                 self._player.setPosition(in_ms)
+                pos = in_ms
             self._player.play()
+            self._video_widget.sync_overlay_playback(True, pos)
 
     def _step_by_ms(self, delta_ms: int) -> None:
         if self._video_info is None or self._duration_ms <= 0:
             return
-        target = max(0, min(self._duration_ms, self._player.position() + delta_ms))
+        base_pos = self._still_pos_ms if (self._base_asset and self._base_asset.kind == "image") else self._player.position()
+        target = max(0, min(self._duration_ms, base_pos + delta_ms))
         self._seek_to_ms(target)
 
     def _seek_to_ms(self, ms: int) -> None:
         if self._video_info is None:
             return
+        if self._base_asset is not None and self._base_asset.kind == "image":
+            self._still_pos_ms = max(0, min(self._duration_ms, ms))
+            self._timeline.set_position(self._still_pos_ms)
+            self._update_time_label(self._still_pos_ms)
+            self._video_widget.set_playhead_sec(self._still_pos_ms / 1000.0)
+            self._video_widget.sync_overlay_playback(self._still_playing, self._still_pos_ms)
+            return
+
         if self._player.playbackState() == QMediaPlayer.PlaybackState.StoppedState:
             self._player.pause()
         player_ms = min(ms, max(0, self._duration_ms - 50)) if self._duration_ms > 50 else ms
         self._player.setPosition(player_ms)
         self._timeline.set_position(ms)
         self._update_time_label(ms)
+        self._video_widget.set_playhead_sec(ms / 1000.0)
+        self._video_widget.sync_overlay_playback(
+            self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState,
+            ms,
+        )
 
     def _toggle_preview_mute(self) -> None:
         muted = not self._audio_output.isMuted()
         self._audio_output.setMuted(muted)
+        self._video_widget.set_overlay_preview_muted(muted)
         self._mute_preview_btn.setText("Unmute" if muted else "Mute")
         self._refresh_icons()
 
     def _set_in_at_playhead(self) -> None:
-        if self._video_info is None:
+        if self._video_info is None or (self._base_asset and self._base_asset.kind == "image"):
             return
         self._timeline.set_trim_points(self._player.position(), self._timeline.out_ms(), emit=True)
 
     def _set_out_at_playhead(self) -> None:
-        if self._video_info is None:
+        if self._video_info is None or (self._base_asset and self._base_asset.kind == "image"):
             return
         self._timeline.set_trim_points(self._timeline.in_ms(), self._player.position(), emit=True)
 
     def _reset_trim(self) -> None:
-        if self._video_info is None:
+        if self._video_info is None or (self._base_asset and self._base_asset.kind == "image"):
             return
         self._timeline.set_trim_points(0, self._duration_ms, emit=True)
 
@@ -985,6 +1322,8 @@ class MainWindow(QMainWindow):
         if enabled and self._video_info is None:
             self._crop_btn.setChecked(False)
             return
+        if enabled and self._video_widget.is_overlay_crop_mode():
+            self._set_overlay_crop_mode(False)
         self._video_widget.set_crop_mode(enabled)
         self._crop_btn.setText("Done Crop (C)" if enabled else "Crop (C)")
         self._refresh_icons()
@@ -1002,6 +1341,8 @@ class MainWindow(QMainWindow):
         self._refresh_estimate_and_output()
 
     def _on_trim_changed(self, in_ms: int, out_ms: int) -> None:
+        if self._base_asset and self._base_asset.kind == "image":
+            return
         self._in_badge.setText(f"In: {format_timestamp_ms(in_ms)}")
         self._out_badge.setText(f"Out: {format_timestamp_ms(out_ms)}")
         clip_sec = max(0.0, (out_ms - in_ms) / 1000.0)
@@ -1011,6 +1352,7 @@ class MainWindow(QMainWindow):
     def _on_player_position_changed(self, pos_ms: int) -> None:
         self._timeline.set_position(pos_ms)
         self._update_time_label(pos_ms)
+        self._video_widget.set_playhead_sec(pos_ms / 1000.0)
         if (
             self._loop_check.isChecked()
             and self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
@@ -1020,7 +1362,7 @@ class MainWindow(QMainWindow):
             self._player.setPosition(self._timeline.in_ms())
 
     def _on_player_duration_changed(self, duration_ms: int) -> None:
-        if duration_ms > 0 and self._video_info is not None:
+        if duration_ms > 0 and self._video_info is not None and (not self._base_asset or self._base_asset.kind != "image"):
             prev_duration = self._duration_ms
             was_full = self._timeline.in_ms() == 0 and self._timeline.out_ms() == prev_duration
             self._duration_ms = duration_ms
@@ -1035,9 +1377,11 @@ class MainWindow(QMainWindow):
         self._play_btn.setIcon(
             make_monoline_icon("pause" if is_playing else "play", self._theme.text_primary)
         )
+        if not (self._base_asset and self._base_asset.kind == "image"):
+            self._video_widget.sync_overlay_playback(is_playing)
 
     def _on_media_status_changed(self, status: QMediaPlayer.MediaStatus) -> None:
-        if self._video_info is None:
+        if self._video_info is None or (self._base_asset and self._base_asset.kind == "image"):
             return
         if status == QMediaPlayer.MediaStatus.LoadedMedia:
             if self._player.playbackState() == QMediaPlayer.PlaybackState.StoppedState:
@@ -1061,10 +1405,23 @@ class MainWindow(QMainWindow):
             f"{format_timestamp_ms(pos_ms)} / {format_timestamp_ms(self._duration_ms)}"
         )
 
+    def _active_export_ext(self) -> MemeExportFormat:
+        if self._output_format == "mp4":
+            return "mp4"
+        return self._meme_panel.export_format()
+
+    def _update_export_button_label(self) -> None:
+        fmt = self._active_export_ext()
+        self._export_btn.setText(f"Export {fmt.upper()}")
+
     def _set_output_format(self, fmt: Literal["mp4", "gif"]) -> None:
         self._output_format = fmt
         self._options_stack.setCurrentIndex(0 if fmt == "mp4" else 1)
-        self._export_btn.setText("Export MP4" if fmt == "mp4" else "Export GIF")
+        self._video_widget.set_meme_mode(fmt == "gif")
+        if fmt == "mp4":
+            self._video_widget.set_overlay_crop_mode(False)
+            self._meme_panel.set_overlay_crop_checked(False)
+        self._update_export_button_label()
         self._refresh_default_output_path()
         self._sync_caption_preview()
 
@@ -1102,18 +1459,19 @@ class MainWindow(QMainWindow):
     def _refresh_default_output_path(self) -> None:
         if self._video_info is None:
             return
-        ext = ".mp4" if self._output_format == "mp4" else ".gif"
+        active_fmt = self._active_export_ext()
+        ext = f".{active_fmt}"
         if self._output_customized and self._output_edit.text().strip():
             current = Path(self._output_edit.text().strip())
             self._output_edit.setText(str(current.with_suffix(ext)))
             return
 
         src = self._video_info.path
-        suffix_tag = "_cut"
-        if self._output_format == "mp4":
-            target_mb = self._selected_target_mb()
+        suffix_tag = "_meme" if (self._output_format == "gif" and (self._meme_layers or self._top_bar_text.strip() or (self._base_asset and self._base_asset.kind == "image"))) else "_cut"
+        if active_fmt == "mp4":
+            target_mb = self._selected_target_mb() if self._output_format == "mp4" else self._meme_panel.mp4_target_mb()
             if target_mb is not None:
-                suffix_tag = f"_cut_{target_mb:g}mb"
+                suffix_tag = f"{suffix_tag}_{target_mb:g}mb"
         candidate = src.with_name(f"{src.stem}{suffix_tag}{ext}")
         if candidate.resolve() == src.resolve():
             candidate = src.with_name(f"{src.stem}_edited{ext}")
@@ -1123,10 +1481,16 @@ class MainWindow(QMainWindow):
         self._output_customized = True
 
     def _choose_output_file(self) -> None:
-        ext = "mp4" if self._output_format == "mp4" else "gif"
-        filt = "MP4 Video (*.mp4)" if ext == "mp4" else "GIF Animation (*.gif)"
+        ext = self._active_export_ext()
+        filter_map = {
+            "mp4": "MP4 Video (*.mp4)",
+            "gif": "GIF Animation (*.gif)",
+            "png": "PNG Image (*.png)",
+            "jpg": "JPEG Image (*.jpg)",
+        }
+        filt = filter_map.get(ext, "All Files (*)")
         start_path = self._output_edit.text().strip() or str(self.default_open_dir())
-        path_str, _ = QFileDialog.getSaveFileName(self, "Save Exported Clip", start_path, filt)
+        path_str, _ = QFileDialog.getSaveFileName(self, "Save Exported File", start_path, filt)
         if path_str:
             chosen = Path(path_str)
             if chosen.suffix.lower() != f".{ext}":
@@ -1135,7 +1499,7 @@ class MainWindow(QMainWindow):
             self._output_edit.setText(str(chosen))
 
     def _refresh_estimate_and_output(self) -> None:
-        if self._video_info is None:
+        if self._video_info is None or (self._base_asset and self._base_asset.kind == "image"):
             self._mp4_estimate_label.setText("")
             return
 
@@ -1171,8 +1535,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Missing Output Path", "Please choose where to save the file.")
             return
 
+        active_fmt = self._active_export_ext()
         out_path = Path(out_str)
-        expected_ext = f".{self._output_format}"
+        expected_ext = f".{active_fmt}"
         if out_path.suffix.lower() != expected_ext:
             out_path = out_path.with_suffix(expected_ext)
             self._output_edit.setText(str(out_path))
@@ -1181,36 +1546,78 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Invalid Output Path",
-                "Output file cannot overwrite the source video. Pick a different filename.",
+                "Output file cannot overwrite the source file. Pick a different filename.",
             )
             return
 
-        start_sec = self._timeline.in_ms() / 1000.0
-        end_sec = self._timeline.out_ms() / 1000.0
-        if end_sec <= start_sec:
-            QMessageBox.warning(self, "Invalid Trim Range", "Out point must be after In point.")
-            return
-
-        mode, fixed_height = self._mp4_res_combo.currentData()
-        options = ExportOptions(
-            input_path=self._video_info.path,
-            output_path=out_path,
-            start_sec=start_sec,
-            end_sec=end_sec,
-            output_format=self._output_format,
-            video_info=self._video_info,
-            crop=self._active_crop,
-            target_size_mb=self._selected_target_mb(),
-            max_height=fixed_height,
-            auto_scale_for_target=(mode == "auto"),
-            mute_audio=self._mute_export_check.isChecked(),
-            gif_fps=int(self._gif_fps_combo.currentData()),
-            gif_max_width=self._gif_width_combo.currentData(),
-            gif_target_size_mb=self._gif_limit_combo.currentData(),
-            gif_caption=self._current_gif_caption(),
+        use_meme_pipeline = self._output_format == "gif" and (
+            bool(self._meme_layers)
+            or bool(self._top_bar_text.strip())
+            or (self._base_asset is not None and self._base_asset.kind == "image")
+            or active_fmt != "gif"
         )
 
+        if use_meme_pipeline:
+            comp = self._build_meme_composition()
+            assert comp is not None
+            still_sec = (
+                self._player.position() / 1000.0
+                if (self._base_asset is not None and self._base_asset.kind != "image")
+                else 0.0
+            )
+            options = ExportOptions(
+                input_path=self._video_info.path,
+                output_path=out_path,
+                start_sec=comp.base.start_sec,
+                end_sec=max(comp.base.start_sec + 0.2, comp.base.end_sec or comp.effective_duration_sec()),
+                output_format=active_fmt,
+                video_info=self._video_info,
+                crop=self._active_crop,
+                target_size_mb=self._meme_panel.mp4_target_mb() if active_fmt == "mp4" else None,
+                mute_audio=self._meme_panel.mp4_mute_audio(),
+                gif_fps=int(self._gif_fps_combo.currentData()),
+                gif_max_width=self._gif_width_combo.currentData(),
+                gif_target_size_mb=self._gif_limit_combo.currentData(),
+                gif_caption=self._current_gif_caption(),
+                meme_composition=comp,
+                still_frame_sec=still_sec,
+            )
+        else:
+            if self._base_asset is not None and self._base_asset.kind == "image":
+                QMessageBox.information(
+                    self,
+                    "Image Source",
+                    "Static images export through the GIF / Meme tab.",
+                )
+                return
+            start_sec = self._timeline.in_ms() / 1000.0
+            end_sec = self._timeline.out_ms() / 1000.0
+            if end_sec <= start_sec:
+                QMessageBox.warning(self, "Invalid Trim Range", "Out point must be after In point.")
+                return
+
+            mode, fixed_height = self._mp4_res_combo.currentData()
+            options = ExportOptions(
+                input_path=self._video_info.path,
+                output_path=out_path,
+                start_sec=start_sec,
+                end_sec=end_sec,
+                output_format=self._output_format,
+                video_info=self._video_info,
+                crop=self._active_crop,
+                target_size_mb=self._selected_target_mb(),
+                max_height=fixed_height,
+                auto_scale_for_target=(mode == "auto"),
+                mute_audio=self._mute_export_check.isChecked(),
+                gif_fps=int(self._gif_fps_combo.currentData()),
+                gif_max_width=self._gif_width_combo.currentData(),
+                gif_target_size_mb=self._gif_limit_combo.currentData(),
+                gif_caption=self._current_gif_caption(),
+            )
+
+        self._stop_still_playback()
         self._player.pause()
+        self._video_widget.sync_overlay_playback(False)
         self._result_widget.setVisible(False)
         self._progress_bar.setValue(0)
         self._progress_bar.setVisible(True)
@@ -1340,9 +1747,11 @@ class MainWindow(QMainWindow):
                 )
 
     def closeEvent(self, event) -> None:
+        self._stop_still_playback()
         if self._worker is not None and self._worker.isRunning():
             self._worker.cancel()
             self._worker.wait(3000)
+        self._video_widget.clear_meme_caches()
         self._yt_drawer.shutdown()
         self._player.stop()
         self._player.setSource(QUrl())

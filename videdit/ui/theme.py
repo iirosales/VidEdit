@@ -465,4 +465,29 @@ QListWidget#DownloadedClipsList::item:selected {{
     background-color: {t.bg_surface};
     border-left: 2px solid {t.accent_cobalt};
 }}
+
+QScrollArea {{
+    background: transparent;
+    border: none;
+}}
+
+QScrollArea > QWidget > QWidget {{
+    background: transparent;
+}}
+
+QScrollBar:vertical {{
+    background: transparent;
+    width: 6px;
+    margin: 2px 0;
+}}
+
+QScrollBar::handle:vertical {{
+    background: {t.border_hover};
+    border-radius: 3px;
+    min-height: 24px;
+}}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+    height: 0px;
+}}
 """
