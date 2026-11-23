@@ -107,6 +107,19 @@ def make_monoline_icon(name: str, color: str, size: int = 16) -> QIcon:
         # Classic overlapping right-angle crop frame
         p.drawPolyline(QPolygonF([QPointF(m + 2.0, m), QPointF(m + 2.0, s - m - 2.0), QPointF(s - m, s - m - 2.0)]))
         p.drawPolyline(QPolygonF([QPointF(m, m + 2.0), QPointF(s - m - 2.0, m + 2.0), QPointF(s - m - 2.0, s - m)]))
+    elif name == "download":
+        # Downward arrow into open tray
+        p.drawLine(QPointF(mid, m), QPointF(mid, s - m - 3.0))
+        p.drawPolyline(
+            QPolygonF([QPointF(mid - 3.0, s - m - 6.0), QPointF(mid, s - m - 3.0), QPointF(mid + 3.0, s - m - 6.0)])
+        )
+        p.drawPolyline(
+            QPolygonF([QPointF(m, s - m - 2.0), QPointF(m, s - m), QPointF(s - m, s - m), QPointF(s - m, s - m - 2.0)])
+        )
+    elif name == "paste":
+        # Minimal clipboard outline
+        p.drawRect(QRectF(m + 1.0, m + 2.0, s - 2 * m - 2.0, s - 2 * m - 2.0))
+        p.drawRect(QRectF(mid - 2.0, m, 4.0, 2.0))
 
     p.end()
     return QIcon(pixmap)

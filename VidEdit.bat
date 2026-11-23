@@ -13,8 +13,13 @@ if not defined FFMPEG_OK (
     )
 )
 
-rem Fast path: launch immediately when .venv and FFmpeg are already present
-if exist ".venv\Scripts\pythonw.exe" if defined FFMPEG_OK (
+set "YTDLP_OK="
+if exist ".venv\Scripts\python.exe" (
+    ".venv\Scripts\python.exe" -c "import yt_dlp" >nul 2>&1 && set "YTDLP_OK=1"
+)
+
+rem Fast path: launch immediately when .venv, yt-dlp, and FFmpeg are already present
+if exist ".venv\Scripts\pythonw.exe" if defined FFMPEG_OK if defined YTDLP_OK (
     start "" ".venv\Scripts\pythonw.exe" "run.py" %*
     exit /b 0
 )
@@ -72,6 +77,17 @@ if not exist ".venv\Scripts\pythonw.exe" (
     )
 
     echo [VidEdit] Installing Python dependencies...
+    ".venv\Scripts\python.exe" -m pip install -r requirements.txt
+    if errorlevel 1 (
+        echo [VidEdit] ERROR: Failed to install requirements.
+        pause
+        exit /b 1
+    )
+    set "YTDLP_OK=1"
+)
+
+if not defined YTDLP_OK (
+    echo [VidEdit] Installing missing Python dependencies...
     ".venv\Scripts\python.exe" -m pip install -r requirements.txt
     if errorlevel 1 (
         echo [VidEdit] ERROR: Failed to install requirements.

@@ -318,7 +318,7 @@ QPushButton#StatusBtn:hover {{
     color: {t.text_primary};
 }}
 
-QLineEdit, QComboBox, QDoubleSpinBox {{
+QLineEdit, QComboBox, QDoubleSpinBox, QPlainTextEdit {{
     background-color: {t.bg_recessed};
     border: 1px solid {t.border_subtle};
     border-radius: 2px;
@@ -327,7 +327,7 @@ QLineEdit, QComboBox, QDoubleSpinBox {{
     font-family: "{ui_font}";
 }}
 
-QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus {{
+QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus, QPlainTextEdit:focus {{
     border: 1px solid {t.accent_cobalt};
 }}
 
@@ -417,5 +417,52 @@ QListWidget#CommandList::item:selected {{
     background-color: {t.bg_surface};
     border-left: 2px solid {t.accent_cobalt};
     color: {t.text_primary};
+}}
+
+QPushButton#EdgeDrawerBtn {{
+    background-color: {t.bg_surface};
+    border: 1px solid {t.border_subtle};
+    border-radius: 3px;
+    padding: 6px 2px;
+    color: {t.text_muted};
+    font-family: "{mono_font}";
+    font-size: 10px;
+    font-weight: 600;
+}}
+
+QPushButton#EdgeDrawerBtn:hover {{
+    background-color: {t.bg_popover};
+    border: 1px solid {t.border_hover};
+    color: {t.text_primary};
+}}
+
+QPushButton#EdgeDrawerBtn:checked {{
+    background-color: {t.bg_popover};
+    border: 1px solid {t.border_hover};
+    border-right: 2px solid {t.accent_cobalt};
+    color: {t.text_primary};
+}}
+
+QPushButton#EdgeDrawerBtn[downloading="true"] {{
+    border-left: 2px solid {t.accent_crimson};
+}}
+
+QListWidget#DownloadedClipsList {{
+    background-color: {t.bg_recessed};
+    border: 1px solid {t.border_subtle};
+    border-radius: 2px;
+    outline: none;
+    font-size: 12px;
+}}
+
+QListWidget#DownloadedClipsList::item {{
+    padding: 5px 8px;
+    border-bottom: 1px solid {t.border_subtle};
+    color: {t.text_primary};
+}}
+
+QListWidget#DownloadedClipsList::item:selected {{
+    background-color: {t.bg_surface};
+    border-left: 2px solid {t.accent_cobalt};
 }}
 """

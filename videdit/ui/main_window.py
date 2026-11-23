@@ -41,6 +41,7 @@ from videdit.ui.icons import ClockworkSpinner, make_monoline_icon
 from videdit.ui.theme import ThemeName, ThemeTokens, build_stylesheet, get_theme
 from videdit.ui.timeline import TrimTimelineWidget
 from videdit.ui.video_preview import VideoPreviewWidget
+from videdit.ui.youtube_drawer import YouTubeDrawerWidget
 from videdit.win_taskbar import apply_window_taskbar_metadata
 
 SUPPORTED_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".gif"}
@@ -123,6 +124,7 @@ class MainWindow(QMainWindow):
         self._worker: Optional[ExportWorker] = None
         self._last_exported_path: Optional[Path] = None
         self._taskbar_props_applied: bool = False
+        self._yt_drawer_added_width: int = 0
 
         self._player = QMediaPlayer(self)
         self._audio_output = QAudioOutput(self)
@@ -368,6 +370,27 @@ class MainWindow(QMainWindow):
         side_layout.addLayout(btn_row)
 
         outer.addWidget(sidebar)
+
+        # Semi-hidden right-edge YouTube MP4 downloader toggle & collapsible drawer
+        yt_wrap = QWidget()
+        yt_wrap_layout = QHBoxLayout(yt_wrap)
+        yt_wrap_layout.setContentsMargins(0, 0, 0, 0)
+        yt_wrap_layout.setSpacing(8)
+
+        self._yt_edge_btn = QPushButton("‹\nY\nT")
+        self._yt_edge_btn.setObjectName("EdgeDrawerBtn")
+        self._yt_edge_btn.setCheckable(True)
+        self._yt_edge_btn.setFixedWidth(24)
+        self._yt_edge_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        self._yt_edge_btn.setToolTip("YouTube MP4 Downloader (Ctrl+Y)")
+
+        self._yt_drawer = YouTubeDrawerWidget(self._settings)
+        self._yt_drawer.setVisible(False)
+
+        yt_wrap_layout.addWidget(self._yt_edge_btn)
+        yt_wrap_layout.addWidget(self._yt_drawer)
+        outer.addWidget(yt_wrap)
+
         shell_layout.addWidget(body, stretch=1)
 
         # 26px bottom status bar
@@ -624,6 +647,12 @@ class MainWindow(QMainWindow):
         self._cmd_palette_btn.clicked.connect(self.open_command_palette)
         self._theme_toggle_btn.clicked.connect(self.toggle_theme)
 
+        self._yt_edge_btn.toggled.connect(self._set_youtube_drawer_open)
+        self._yt_drawer.close_requested.connect(lambda: self._set_youtube_drawer_open(False))
+        self._yt_drawer.load_video_requested.connect(self._load_downloaded_video)
+        self._yt_drawer.download_state_changed.connect(self._on_yt_download_state_changed)
+        self._yt_drawer.progress_summary.connect(self._on_yt_progress)
+
     def _setup_shortcuts(self) -> None:
         self._bind_shortcut("Space", self._toggle_play_pause)
         self._bind_shortcut("I", self._set_in_at_playhead)
@@ -636,6 +665,8 @@ class MainWindow(QMainWindow):
         self._bind_shortcut("Shift+Right", lambda: self._step_by_ms(1000))
         palette_sc = QShortcut(QKeySequence("Ctrl+K"), self)
         palette_sc.activated.connect(self.open_command_palette)
+        yt_sc = QShortcut(QKeySequence("Ctrl+Y"), self)
+        yt_sc.activated.connect(self.toggle_youtube_drawer)
 
     def _bind_shortcut(self, key: str, callback) -> None:
         shortcut = QShortcut(QKeySequence(key), self)
@@ -663,6 +694,7 @@ class MainWindow(QMainWindow):
         self._timeline.apply_theme(self._theme)
         self._drop_stage.apply_theme(self._theme)
         self._video_widget.apply_theme(self._theme)
+        self._yt_drawer.apply_theme(self._theme)
         self._dial_spinner.set_colors(self._theme.color_secondary, self._theme.accent_cobalt)
         self._theme_toggle_btn.setText(f"Theme: {self._theme.display_name}")
         self._refresh_icons()
@@ -705,6 +737,7 @@ class MainWindow(QMainWindow):
             CommandEntry("MP4 Preset: 15 MB", "", lambda: self._select_mp4_preset("15")),
             CommandEntry("MP4 Preset: 20 MB", "", lambda: self._select_mp4_preset("20")),
             CommandEntry("Export Current Clip", "", self._start_export),
+            CommandEntry("Toggle YouTube MP4 Downloader", "Ctrl+Y", self.toggle_youtube_drawer),
             CommandEntry("Toggle Light / Dark Theme", "", self.toggle_theme),
         ]
 
@@ -796,6 +829,7 @@ class MainWindow(QMainWindow):
         self._settings.sync()
         active = self.default_open_dir()
         self._refresh_default_open_dir_ui(active)
+        self._yt_drawer.refresh_default_folder()
         return active
 
     def _refresh_default_open_dir_ui(self, active: Optional[Path] = None) -> None:
@@ -1228,6 +1262,61 @@ class MainWindow(QMainWindow):
         if message != "Export cancelled.":
             QMessageBox.critical(self, "Export Failed", message)
 
+    def toggle_youtube_drawer(self) -> None:
+        """Toggle visibility of the collapsible right-edge YouTube MP4 downloader drawer."""
+        self._set_youtube_drawer_open(self._yt_drawer.isHidden())
+
+    def _set_youtube_drawer_open(self, open_drawer: bool) -> None:
+        if self._yt_edge_btn.isChecked() != open_drawer:
+            self._yt_edge_btn.blockSignals(True)
+            self._yt_edge_btn.setChecked(open_drawer)
+            self._yt_edge_btn.blockSignals(False)
+
+        self._yt_edge_btn.setText("›\nY\nT" if open_drawer else "‹\nY\nT")
+        if (not self._yt_drawer.isHidden()) == open_drawer:
+            if open_drawer:
+                self._yt_drawer.focus_url_input()
+            return
+
+        if open_drawer:
+            if self.isVisible() and not self.isMaximized() and self._yt_drawer_added_width == 0:
+                delta = self._yt_drawer.width() + 8
+                screen = self.screen()
+                avail_w = screen.availableGeometry().width() if screen is not None else 99999
+                if self.width() + delta <= avail_w:
+                    self.resize(self.width() + delta, self.height())
+                    self._yt_drawer_added_width = delta
+            self._yt_drawer.setVisible(True)
+            self._yt_drawer.focus_url_input()
+        else:
+            self._yt_drawer.setVisible(False)
+            if self.isVisible() and not self.isMaximized() and self._yt_drawer_added_width > 0:
+                target_w = max(self.minimumWidth(), self.width() - self._yt_drawer_added_width)
+                self._yt_drawer_added_width = 0
+                self.resize(target_w, self.height())
+
+    def _load_downloaded_video(self, path: Path) -> None:
+        if self._worker is not None and self._worker.isRunning():
+            self._telemetry_label.setText(f"YT READY · {path.name} (export running)")
+            return
+        self.load_video(path)
+
+    def _on_yt_download_state_changed(self, downloading: bool) -> None:
+        self._yt_edge_btn.setProperty("downloading", downloading)
+        style = self._yt_edge_btn.style()
+        if style is not None:
+            style.unpolish(self._yt_edge_btn)
+            style.polish(self._yt_edge_btn)
+        exporting = self._worker is not None and self._worker.isRunning()
+        self._dial_spinner.set_active(downloading or exporting)
+        if not downloading and not exporting:
+            self._telemetry_label.setText("READY")
+
+    def _on_yt_progress(self, pct: int, _status: str) -> None:
+        exporting = self._worker is not None and self._worker.isRunning()
+        if not exporting:
+            self._telemetry_label.setText(f"YT DL · {pct}%")
+
     def _open_output_folder(self) -> None:
         if self._last_exported_path is None:
             return
@@ -1254,6 +1343,7 @@ class MainWindow(QMainWindow):
         if self._worker is not None and self._worker.isRunning():
             self._worker.cancel()
             self._worker.wait(3000)
+        self._yt_drawer.shutdown()
         self._player.stop()
         self._player.setSource(QUrl())
         self._player.setVideoOutput(None)
